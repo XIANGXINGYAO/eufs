@@ -1,0 +1,24 @@
+/build/
+/build-sanitize/
+/build-tsan*/
+/Testing/
+/context/
+/eufs.img
+
+# Local planning and private career material. These files stay on disk but are
+# intentionally excluded from the public repository history.
+/AGENTS.md
+/job_pool/
+/notes/
+/docs/2027*
+/docs/*秋招*
+/docs/项目全局学习与交付地图_*.md
+/docs/项目唯一主线与教学执行计划_*.md
+/docs/项目完整设计_*.md
+/evidence/research/project-competitiveness-audit-*.md
+/evidence/research/toyou-targeted-competitiveness-decision-*.md
+
+# Reproducible command output belongs in CI artifacts, not source history.
+/evidence/build/*.log
+/evidence/runtime/*.log
+/evidence/runtime/*.txt
