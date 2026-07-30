@@ -378,6 +378,24 @@ if(BUILD_TESTING)
   target_compile_definitions(file_write_plan_test PRIVATE _FILE_OFFSET_BITS=64)
   add_test(NAME file_write_plan_test COMMAND file_write_plan_test)
 
+  add_executable(file_write_indirect_recovery_test
+    tests/file_write_indirect_recovery_test.cpp
+  )
+  target_link_libraries(file_write_indirect_recovery_test PRIVATE
+    eufs_file_write_plan eufs_writable_image eufs_create_plan
+    eufs_journal_control_store eufs_consistency_checker eufs_image_reader
+    eufs_mkfs_core
+  )
+  target_compile_options(file_write_indirect_recovery_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(file_write_indirect_recovery_test PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+  add_test(NAME file_write_indirect_recovery_test
+    COMMAND file_write_indirect_recovery_test
+  )
+
   add_executable(first_block_write_apply_test tests/first_block_write_apply_test.cpp)
   target_link_libraries(first_block_write_apply_test PRIVATE eufs_writable_image eufs_mkfs_core eufs_image_reader)
   target_compile_options(first_block_write_apply_test PRIVATE -Wall -Wextra -Wpedantic)
