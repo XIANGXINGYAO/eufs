@@ -72,6 +72,13 @@ target_include_directories(eufs_file_write_plan PUBLIC ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(eufs_file_write_plan PUBLIC eufs_image_reader eufs_bitmap_allocator eufs_ondisk)
 target_compile_options(eufs_file_write_plan PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(eufs_new_object_plan
+  src/metadata/new_object_plan.cpp
+)
+target_include_directories(eufs_new_object_plan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(eufs_new_object_plan PUBLIC eufs_image_reader eufs_bitmap_allocator eufs_ondisk)
+target_compile_options(eufs_new_object_plan PRIVATE -Wall -Wextra -Wpedantic)
+
 add_library(eufs_journal_format
   src/journal/ondisk_journal.cpp
 )
@@ -395,6 +402,36 @@ if(BUILD_TESTING)
   add_test(NAME file_write_indirect_recovery_test
     COMMAND file_write_indirect_recovery_test
   )
+
+  add_executable(new_object_plan_test
+    tests/new_object_plan_test.cpp
+  )
+  target_link_libraries(new_object_plan_test PRIVATE
+    eufs_new_object_plan eufs_journal_control_store
+    eufs_consistency_checker eufs_mkfs_core
+  )
+  target_compile_options(new_object_plan_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(new_object_plan_test PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+  add_test(NAME new_object_plan_test COMMAND new_object_plan_test)
+
+  add_executable(new_object_recovery_test
+    tests/new_object_recovery_test.cpp
+  )
+  target_link_libraries(new_object_recovery_test PRIVATE
+    eufs_new_object_plan eufs_journal_control_store
+    eufs_consistency_checker eufs_mkfs_core
+  )
+  target_compile_options(new_object_recovery_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(new_object_recovery_test PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+  add_test(NAME new_object_recovery_test COMMAND new_object_recovery_test)
 
   add_executable(first_block_write_apply_test tests/first_block_write_apply_test.cpp)
   target_link_libraries(first_block_write_apply_test PRIVATE eufs_writable_image eufs_mkfs_core eufs_image_reader)

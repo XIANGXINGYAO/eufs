@@ -43,6 +43,10 @@ class ImageReader {
 
   int ReadInode(std::uint32_t inode_number, ondisk::InodeRecord* output,
                 std::string* detail) const;
+  int MapLogicalBlock(const ondisk::InodeRecord& inode,
+                      std::uint32_t logical_block,
+                      std::uint32_t* physical_block,
+                      std::string* detail) const;
   int ListDirectory(std::uint32_t inode_number,
                     std::vector<ondisk::DirectoryEntry>* output,
                     std::string* detail) const;
@@ -62,10 +66,6 @@ class ImageReader {
 
   int ReadExact(std::uint64_t offset, std::uint8_t* output, std::size_t size,
                 std::string* detail) const;
-  int MapLogicalBlock(const ondisk::InodeRecord& inode,
-                      std::uint32_t logical_block,
-                      std::uint32_t* physical_block,
-                      std::string* detail) const;
   int ValidateAllocatedDataBlock(std::uint32_t block_number,
                                  std::string* detail) const;
 
