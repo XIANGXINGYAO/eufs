@@ -436,4 +436,25 @@ if(BUILD_TESTING)
   target_compile_options(stage_c_state_startup_test PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_definitions(stage_c_state_startup_test PRIVATE _FILE_OFFSET_BITS=64)
   add_test(NAME stage_c_state_startup_test COMMAND stage_c_state_startup_test)
+
+  add_executable(fuse_write_error_contract_test
+    tests/fuse_write_error_contract_test.cpp
+    src/fuse/read_only_operations.cpp
+  )
+  target_include_directories(fuse_write_error_contract_test PRIVATE
+    ${FUSE3_INCLUDE_DIRS}
+  )
+  target_link_libraries(fuse_write_error_contract_test PRIVATE
+    eufs_stage_c_state eufs_writable_image eufs_consistency_checker
+    eufs_mkfs_core
+  )
+  target_compile_options(fuse_write_error_contract_test PRIVATE
+    ${FUSE3_CFLAGS_OTHER} -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(fuse_write_error_contract_test PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+  add_test(NAME fuse_write_error_contract_test
+    COMMAND fuse_write_error_contract_test
+  )
 endif()
