@@ -12,6 +12,8 @@
 
 namespace eufs::metadata {
 
+bool IsValidRootObjectName(std::string_view name);
+
 struct NewObjectPlan {
   std::uint32_t inode_number{0};
   std::uint64_t object_size{0};

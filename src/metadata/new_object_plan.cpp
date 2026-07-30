@@ -13,19 +13,20 @@
 #include <vector>
 
 namespace eufs::metadata {
+
+bool IsValidRootObjectName(std::string_view name) {
+  return !name.empty() && name != "." && name != ".." &&
+         name.size() <= ondisk::kMaxNameLength &&
+         name.find('/') == std::string_view::npos &&
+         name.find('\0') == std::string_view::npos;
+}
+
 namespace {
 
 void SetDetail(std::string* detail, std::string_view message) {
   if (detail != nullptr) {
     detail->assign(message);
   }
-}
-
-bool IsValidObjectName(std::string_view name) {
-  return !name.empty() && name != "." && name != ".." &&
-         name.size() <= ondisk::kMaxNameLength &&
-         name.find('/') == std::string_view::npos &&
-         name.find('\0') == std::string_view::npos;
 }
 
 void PutLe32(std::uint8_t* output, std::uint32_t value) {
@@ -200,7 +201,7 @@ int PrepareNewRootObject(const storage::ImageReader& image,
                          std::uint32_t permissions, std::uint32_t uid,
                          std::uint32_t gid, std::uint64_t timestamp_ns,
                          NewObjectPlan* output, std::string* detail) {
-  if (output == nullptr || !IsValidObjectName(name)) {
+  if (output == nullptr || !IsValidRootObjectName(name)) {
     SetDetail(detail, "new object requires an output and valid root name");
     return -EINVAL;
   }

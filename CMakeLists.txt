@@ -102,6 +102,32 @@ target_link_libraries(eufs_journal_control_store PUBLIC eufs_ring_reservation)
 target_compile_options(eufs_journal_control_store PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_definitions(eufs_journal_control_store PRIVATE _FILE_OFFSET_BITS=64)
 
+add_library(eufs_journal_transaction_executor
+  src/journal/journal_transaction_executor.cpp
+)
+target_include_directories(eufs_journal_transaction_executor PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(eufs_journal_transaction_executor PUBLIC
+  eufs_journal_control_store eufs_mounted_image_session
+)
+target_compile_options(eufs_journal_transaction_executor PRIVATE
+  -Wall -Wextra -Wpedantic
+)
+target_compile_definitions(eufs_journal_transaction_executor PRIVATE
+  _FILE_OFFSET_BITS=64
+)
+
+add_library(eufs_object_backend
+  src/object/object_backend.cpp
+)
+target_include_directories(eufs_object_backend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(eufs_object_backend PUBLIC
+  eufs_new_object_plan eufs_journal_transaction_executor
+  eufs_mounted_image_session eufs_image_reader Threads::Threads
+)
+target_compile_options(eufs_object_backend PRIVATE -Wall -Wextra -Wpedantic)
+
 target_link_libraries(eufs_mkfs_core PUBLIC eufs_journal_format)
 target_link_libraries(eufs_image_reader PUBLIC eufs_journal_format)
 target_link_libraries(eufs_consistency_checker PUBLIC eufs_journal_format)
@@ -147,7 +173,10 @@ add_executable(eufsd
 )
 target_include_directories(eufsd PRIVATE ${FUSE3_INCLUDE_DIRS})
 target_link_directories(eufsd PRIVATE ${FUSE3_LIBRARY_DIRS})
-target_link_libraries(eufsd PRIVATE eufs_stage_c_state eufs_writable_image ${FUSE3_LIBRARIES})
+target_link_libraries(eufsd PRIVATE
+  eufs_stage_c_state eufs_writable_image eufs_journal_transaction_executor
+  ${FUSE3_LIBRARIES}
+)
 target_compile_options(eufsd PRIVATE ${FUSE3_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
 target_compile_definitions(eufsd PRIVATE _FILE_OFFSET_BITS=64)
 
@@ -433,6 +462,21 @@ if(BUILD_TESTING)
   )
   add_test(NAME new_object_recovery_test COMMAND new_object_recovery_test)
 
+  add_executable(object_backend_test
+    tests/object_backend_test.cpp
+  )
+  target_link_libraries(object_backend_test PRIVATE
+    eufs_object_backend eufs_consistency_checker eufs_mkfs_core
+    Threads::Threads
+  )
+  target_compile_options(object_backend_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(object_backend_test PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+  add_test(NAME object_backend_test COMMAND object_backend_test)
+
   add_executable(first_block_write_apply_test tests/first_block_write_apply_test.cpp)
   target_link_libraries(first_block_write_apply_test PRIVATE eufs_writable_image eufs_mkfs_core eufs_image_reader)
   target_compile_options(first_block_write_apply_test PRIVATE -Wall -Wextra -Wpedantic)
@@ -483,7 +527,7 @@ if(BUILD_TESTING)
   )
   target_link_libraries(fuse_write_error_contract_test PRIVATE
     eufs_stage_c_state eufs_writable_image eufs_consistency_checker
-    eufs_mkfs_core
+    eufs_mkfs_core eufs_journal_transaction_executor
   )
   target_compile_options(fuse_write_error_contract_test PRIVATE
     ${FUSE3_CFLAGS_OTHER} -Wall -Wextra -Wpedantic

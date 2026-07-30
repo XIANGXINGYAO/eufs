@@ -2,6 +2,7 @@
 
 #include "fuse/read_only_operations.h"
 
+#include "journal/journal_transaction_executor.h"
 #include "metadata/empty_file_create_plan.h"
 #include "metadata/file_write_plan.h"
 #include "storage/writable_image.h"
@@ -212,41 +213,20 @@ int ApplyJournalTransaction(
     const std::map<std::uint32_t, ondisk::Block>& metadata_after_images,
     std::uint32_t total_blocks,
     const std::array<std::uint8_t, 16>& filesystem_uuid, std::string* detail) {
-  int mutation_fd = -1;
-  int result = State().session->DuplicateFd(&mutation_fd, detail);
-  if (result != 0) {
-    return result;
-  }
-
-  std::unique_ptr<journal::JournalControlStore> store;
-  result = journal::JournalControlStore::AdoptLockedFd(
-      mutation_fd, &store, detail, nullptr, State().mutation_observer);
-  if (result != 0) {
+  bool failure_requires_fail_closed = false;
+  int result = journal::ExecuteJournalTransaction(
+      *State().session, before_images, ordered_data_after_images,
+      metadata_after_images, total_blocks, filesystem_uuid,
+      nullptr, State().mutation_observer, &failure_requires_fail_closed,
+      detail);
+  if (result != 0 && failure_requires_fail_closed) {
     std::cerr << "eufsd: journal mutation failed: "
               << (detail == nullptr ? std::string_view{} : *detail)
               << " (errno " << -result << ")\n";
     State().FailClosed(result, detail == nullptr ? std::string_view{} : *detail);
     return result;
   }
-
-  journal::DurableJournalBody body;
-  result = store->WriteOrderedDataAndUnexposedBody(
-      total_blocks, filesystem_uuid, before_images, ordered_data_after_images,
-      metadata_after_images, &body, detail);
-  if (result == 0) {
-    result = store->ExposeDurableBody(detail);
-  }
-  if (result == 0) {
-    result = store->WriteCommit(detail);
-  }
-  if (result == 0) {
-    result = store->CompleteCommittedTransaction(detail);
-  }
   if (result != 0) {
-    std::cerr << "eufsd: journal mutation failed: "
-              << (detail == nullptr ? std::string_view{} : *detail)
-              << " (errno " << -result << ")\n";
-    State().FailClosed(result, detail == nullptr ? std::string_view{} : *detail);
     return result;
   }
   result = State().ReloadReader(detail);
