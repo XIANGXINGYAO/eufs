@@ -1,3 +1,5 @@
+// 验证进程内 ObjectBackend 的新建/条件替换/读取语义、并发互斥和持久化结果。
+// 这是后续 RPC 层可复用的业务接口证据；测试本身不假装已经实现网络协议。
 #include "checker/consistency_checker.h"
 #include "object/object_backend.h"
 #include "storage/mkfs.h"
@@ -172,6 +174,59 @@ void TestDirectApiAndFailureContracts() {
   unlink(path.c_str());
 }
 
+void TestConditionalReplacementAndRestart() {
+  const std::string path = CreateImage();
+  auto backend = OpenBackend(path);
+  std::string detail;
+  Require(backend->PutIfAbsent("replace", "old-payload-tail", 10, &detail) ==
+              0,
+          detail.c_str());
+  eufs::object_store::ObjectStat before;
+  Require(backend->Stat("replace", &before, &detail) == 0,
+          detail.c_str());
+  const eufs::object_store::ObjectVersion old_version{
+      before.inode_number, before.generation};
+
+  eufs::object_store::MutationResult mutation;
+  Require(backend->ReplaceIfVersion("replace", old_version, "new", 20,
+                                    &mutation, &detail) == 0 &&
+              mutation.outcome ==
+                  eufs::object_store::MutationOutcome::kCommitted &&
+              mutation.committed_version.inode_number == before.inode_number &&
+              mutation.committed_version.generation == before.generation + 1U,
+          detail.c_str());
+  std::string contents;
+  eufs::object_store::ObjectStat after;
+  Require(backend->Get("replace", &contents, &detail) == 0 &&
+              contents == "new" &&
+              backend->Stat("replace", &after, &detail) == 0 &&
+              after.size == 3 && after.generation == before.generation + 1U,
+          "conditional replacement retained old tail or generation");
+
+  const auto image_after_success = ReadWholeImage(path);
+  eufs::object_store::MutationResult stale;
+  Require(backend->ReplaceIfVersion("replace", old_version, "loser", 30,
+                                    &stale, &detail) == -ESTALE &&
+              stale.outcome ==
+                  eufs::object_store::MutationOutcome::kNotApplied &&
+              stale.current_version.inode_number == after.inode_number &&
+              stale.current_version.generation == after.generation &&
+              ReadWholeImage(path) == image_after_success,
+          "stale replacement changed the image or omitted current version");
+
+  backend.reset();
+  backend = OpenBackend(path);
+  contents.clear();
+  Require(backend->Get("replace", &contents, &detail) == 0 &&
+              contents == "new" &&
+              backend->Stat("replace", &after, &detail) == 0 &&
+              after.generation == mutation.committed_version.generation,
+          "replacement did not survive backend restart");
+  backend.reset();
+  RequireHealthy(path);
+  unlink(path.c_str());
+}
+
 class BlockingCommitObserver final
     : public eufs::journal::DurableStageObserver {
  public:
@@ -295,6 +350,49 @@ void TestUncertainDurabilityFailsClosed() {
   unlink(path.c_str());
 }
 
+void TestReplacementUncertaintyIsReported() {
+  const std::string path = CreateImage();
+  {
+    auto seed = OpenBackend(path);
+    std::string detail;
+    Require(seed->PutIfAbsent("uncertain-replace", "old", 10, &detail) == 0,
+            detail.c_str());
+  }
+
+  auto fault_io = std::make_shared<FailFirstSyncIo>();
+  std::unique_ptr<eufs::object_store::ObjectBackend> backend;
+  eufs::journal::RecoveryAction action{};
+  std::string detail;
+  Require(eufs::object_store::ObjectBackend::Open(
+              path, BackendOptions(), &backend, &action, &detail, nullptr,
+              fault_io) == 0,
+          detail.c_str());
+  eufs::object_store::ObjectStat stat;
+  Require(backend->Stat("uncertain-replace", &stat, &detail) == 0,
+          detail.c_str());
+  eufs::object_store::MutationResult mutation;
+  Require(backend->ReplaceIfVersion(
+              "uncertain-replace", {stat.inode_number, stat.generation},
+              "new", 20, &mutation, &detail) == -EIO &&
+              mutation.outcome ==
+                  eufs::object_store::MutationOutcome::kUnknown &&
+              mutation.current_version.inode_number == 0 &&
+              mutation.current_version.generation == 0 &&
+              !backend->usable(),
+          "uncertain replacement was reported as safely not applied");
+  backend.reset();
+
+  // 重启恢复后结果才能重新确定；此注入点位于 COMMIT 前，所以本例恢复为旧值。
+  backend = OpenBackend(path);
+  std::string contents;
+  Require(backend->Get("uncertain-replace", &contents, &detail) == 0 &&
+              contents == "old",
+          "pre-COMMIT uncertain replacement did not recover to old value");
+  backend.reset();
+  RequireHealthy(path);
+  unlink(path.c_str());
+}
+
 struct StartGate {
   std::mutex mutex;
   std::condition_variable condition;
@@ -347,13 +445,79 @@ void TestConcurrentSameNameHasOneWinner() {
   unlink(path.c_str());
 }
 
+void TestConcurrentSameVersionHasOneWinner() {
+  const std::string path = CreateImage();
+  auto backend = OpenBackend(path);
+  std::string detail;
+  Require(backend->PutIfAbsent("replace-race", "old", 10, &detail) == 0,
+          detail.c_str());
+  eufs::object_store::ObjectStat stat;
+  Require(backend->Stat("replace-race", &stat, &detail) == 0,
+          detail.c_str());
+  const eufs::object_store::ObjectVersion expected{stat.inode_number,
+                                                   stat.generation};
+
+  StartGate gate;
+  const std::array<std::string, 2> payloads{"winner-one", "winner-two"};
+  std::array<int, 2> results{};
+  std::array<eufs::object_store::MutationResult, 2> mutations{};
+  std::array<std::future<void>, 2> workers;
+  for (std::size_t index = 0; index < workers.size(); ++index) {
+    workers[index] = std::async(std::launch::async, [&, index] {
+      {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        ++gate.ready;
+        gate.condition.notify_all();
+        gate.condition.wait(lock, [&] { return gate.go; });
+      }
+      std::string thread_detail;
+      results[index] = backend->ReplaceIfVersion(
+          "replace-race", expected, payloads[index], 20 + index,
+          &mutations[index], &thread_detail);
+    });
+  }
+  {
+    std::unique_lock<std::mutex> lock(gate.mutex);
+    gate.condition.wait(lock, [&] { return gate.ready == 2; });
+    gate.go = true;
+    gate.condition.notify_all();
+  }
+  for (auto& worker : workers) {
+    worker.get();
+  }
+
+  const bool first_won = results[0] == 0 && results[1] == -ESTALE;
+  const bool second_won = results[1] == 0 && results[0] == -ESTALE;
+  Require(first_won || second_won,
+          "same-version race did not produce one commit and one ESTALE");
+  const std::size_t winner = first_won ? 0U : 1U;
+  const std::size_t loser = 1U - winner;
+  Require(mutations[winner].outcome ==
+                  eufs::object_store::MutationOutcome::kCommitted &&
+              mutations[loser].outcome ==
+                  eufs::object_store::MutationOutcome::kNotApplied &&
+              mutations[loser].current_version.generation ==
+                  expected.generation + 1U,
+          "same-version race returned wrong mutation outcomes");
+  std::string contents;
+  Require(backend->Get("replace-race", &contents, &detail) == 0 &&
+              contents == payloads[winner],
+          "same-version race published the losing payload");
+  backend.reset();
+  RequireHealthy(path);
+  unlink(path.c_str());
+}
+
 }  // namespace
 
 int main() {
   TestDirectApiAndFailureContracts();
+  TestConditionalReplacementAndRestart();
   TestMutexCoversCommitThroughCheckpoint();
   TestUncertainDurabilityFailsClosed();
+  TestReplacementUncertaintyIsReported();
   TestConcurrentSameNameHasOneWinner();
+  TestConcurrentSameVersionHasOneWinner();
   std::cout << "PASS: direct object backend and serialization contracts\n";
   return 0;
 }

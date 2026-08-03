@@ -65,11 +65,18 @@ target_include_directories(eufs_first_block_write_plan PUBLIC ${CMAKE_CURRENT_SO
 target_link_libraries(eufs_first_block_write_plan PUBLIC eufs_image_reader eufs_bitmap_allocator eufs_ondisk)
 target_compile_options(eufs_first_block_write_plan PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(eufs_file_mutation_plan
+  src/metadata/file_mutation_plan.cpp
+)
+target_include_directories(eufs_file_mutation_plan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(eufs_file_mutation_plan PUBLIC eufs_image_reader eufs_bitmap_allocator eufs_ondisk)
+target_compile_options(eufs_file_mutation_plan PRIVATE -Wall -Wextra -Wpedantic)
+
 add_library(eufs_file_write_plan
   src/metadata/file_write_plan.cpp
 )
 target_include_directories(eufs_file_write_plan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(eufs_file_write_plan PUBLIC eufs_image_reader eufs_bitmap_allocator eufs_ondisk)
+target_link_libraries(eufs_file_write_plan PUBLIC eufs_file_mutation_plan)
 target_compile_options(eufs_file_write_plan PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(eufs_new_object_plan
@@ -78,6 +85,13 @@ add_library(eufs_new_object_plan
 target_include_directories(eufs_new_object_plan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(eufs_new_object_plan PUBLIC eufs_image_reader eufs_bitmap_allocator eufs_ondisk)
 target_compile_options(eufs_new_object_plan PRIVATE -Wall -Wextra -Wpedantic)
+
+add_library(eufs_object_replace_plan
+  src/metadata/object_replace_plan.cpp
+)
+target_include_directories(eufs_object_replace_plan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(eufs_object_replace_plan PUBLIC eufs_file_mutation_plan)
+target_compile_options(eufs_object_replace_plan PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(eufs_journal_format
   src/journal/ondisk_journal.cpp
@@ -123,7 +137,7 @@ add_library(eufs_object_backend
 )
 target_include_directories(eufs_object_backend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(eufs_object_backend PUBLIC
-  eufs_new_object_plan eufs_journal_transaction_executor
+  eufs_new_object_plan eufs_object_replace_plan eufs_journal_transaction_executor
   eufs_mounted_image_session eufs_image_reader Threads::Threads
 )
 target_compile_options(eufs_object_backend PRIVATE -Wall -Wextra -Wpedantic)
@@ -446,6 +460,36 @@ if(BUILD_TESTING)
     _FILE_OFFSET_BITS=64
   )
   add_test(NAME new_object_plan_test COMMAND new_object_plan_test)
+
+  add_executable(object_replace_plan_test
+    tests/object_replace_plan_test.cpp
+  )
+  target_link_libraries(object_replace_plan_test PRIVATE
+    eufs_object_replace_plan eufs_file_write_plan eufs_new_object_plan
+    eufs_journal_control_store eufs_consistency_checker eufs_mkfs_core
+  )
+  target_compile_options(object_replace_plan_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(object_replace_plan_test PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+  add_test(NAME object_replace_plan_test COMMAND object_replace_plan_test)
+
+  add_executable(object_replace_recovery_test
+    tests/object_replace_recovery_test.cpp
+  )
+  target_link_libraries(object_replace_recovery_test PRIVATE
+    eufs_object_replace_plan eufs_new_object_plan eufs_journal_control_store
+    eufs_consistency_checker eufs_mkfs_core
+  )
+  target_compile_options(object_replace_recovery_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(object_replace_recovery_test PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+  add_test(NAME object_replace_recovery_test COMMAND object_replace_recovery_test)
 
   add_executable(new_object_recovery_test
     tests/new_object_recovery_test.cpp
