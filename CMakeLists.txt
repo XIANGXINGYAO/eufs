@@ -131,6 +131,19 @@ target_compile_options(eufs_request_ledger_index PRIVATE
   -Wall -Wextra -Wpedantic
 )
 
+add_library(eufs_request_ledger_plan
+  src/object/request_ledger_plan.cpp
+)
+target_include_directories(eufs_request_ledger_plan PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(eufs_request_ledger_plan PUBLIC
+  eufs_request_ledger_index eufs_image_reader
+)
+target_compile_options(eufs_request_ledger_plan PRIVATE
+  -Wall -Wextra -Wpedantic
+)
+
 add_library(eufs_journal_format
   src/journal/ondisk_journal.cpp
 )
@@ -727,6 +740,37 @@ if(BUILD_TESTING)
     _FILE_OFFSET_BITS=64
   )
   add_test(NAME request_ledger_index_test COMMAND request_ledger_index_test)
+
+  add_executable(request_ledger_plan_test
+    tests/request_ledger_plan_test.cpp
+  )
+  target_link_libraries(request_ledger_plan_test PRIVATE
+    eufs_request_ledger_plan eufs_mkfs_core
+  )
+  target_compile_options(request_ledger_plan_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(request_ledger_plan_test PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+  add_test(NAME request_ledger_plan_test COMMAND request_ledger_plan_test)
+
+  add_executable(request_ledger_transaction_recovery_test
+    tests/request_ledger_transaction_recovery_test.cpp
+  )
+  target_link_libraries(request_ledger_transaction_recovery_test PRIVATE
+    eufs_request_ledger_plan eufs_new_object_plan
+    eufs_journal_transaction_executor eufs_consistency_checker eufs_mkfs_core
+  )
+  target_compile_options(request_ledger_transaction_recovery_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(request_ledger_transaction_recovery_test PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+  add_test(NAME request_ledger_transaction_recovery_test
+    COMMAND request_ledger_transaction_recovery_test
+  )
 
   add_executable(first_block_write_apply_test tests/first_block_write_apply_test.cpp)
   target_link_libraries(first_block_write_apply_test PRIVATE eufs_writable_image eufs_mkfs_core eufs_image_reader)
