@@ -5,15 +5,14 @@
 // 启动顺序固定为：解析参数 -> 独占打开并恢复镜像 -> 注册回调 -> 进入 FUSE 事件循环。
 
 #include "fuse/operations.h"
+#include "journal/durable_stage_failpoint.h"
 
 #include <fuse3/fuse.h>
 
-#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <string_view>
-#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -23,78 +22,6 @@ void PrintUsage() {
   std::cerr << "Usage: eufsd --image IMAGE "
                "[--crash-after STAGE] [FUSE options] MOUNTPOINT\n";
 }
-
-// 把代码内部的持久化阶段枚举转换成命令行可读字符串。
-// --crash-after 使用这些字符串选择故障注入位置。
-const char* DurableStageName(eufs::journal::DurableStage stage) {
-  // 每个枚举值都必须显式映射；新增持久化阶段时这里也必须同步更新。
-  switch (stage) {
-    case eufs::journal::DurableStage::kOrderedData:
-      return "ordered-data";
-    case eufs::journal::DurableStage::kJournalBody:
-      return "journal-body";
-    case eufs::journal::DurableStage::kControlExposure:
-      return "control-exposure";
-    case eufs::journal::DurableStage::kCommit:
-      return "commit";
-    case eufs::journal::DurableStage::kHomeBlocks:
-      return "home-blocks";
-    case eufs::journal::DurableStage::kCheckpoint:
-      return "checkpoint";
-  }
-  // 正常情况下不会到达这里；保留兜底值，避免返回空指针。
-  return "unknown";
-}
-
-// 把用户输入的阶段名称解析回枚举。
-// value 是只读字符串视图；output 用来返回解析结果。
-bool ParseDurableStage(std::string_view value,
-                       eufs::journal::DurableStage* output) {
-  // 遍历当前协议定义的全部六个持久化边界。
-  for (const auto stage : {eufs::journal::DurableStage::kOrderedData,
-                           eufs::journal::DurableStage::kJournalBody,
-                           eufs::journal::DurableStage::kControlExposure,
-                           eufs::journal::DurableStage::kCommit,
-                           eufs::journal::DurableStage::kHomeBlocks,
-                           eufs::journal::DurableStage::kCheckpoint}) {
-    // 复用 DurableStageName，确保“输出名称”和“输入名称”使用同一张映射表。
-    if (value == DurableStageName(stage)) {
-      // 找到匹配项后，把枚举写入调用者提供的地址。
-      *output = stage;
-      // true 表示解析成功。
-      return true;
-    }
-  }
-  // 所有合法阶段都不匹配，说明用户输入无效。
-  return false;
-}
-
-// 真实进程崩溃注入器，只在崩溃矩阵测试中启用。
-// final 禁止继续派生，避免测试行为被子类悄悄改写。
-class ProcessCrashObserver final
-    : public eufs::journal::DurableStageObserver {
- public:
-  // 构造时记录本次测试希望在哪一个持久化阶段杀死进程。
-  explicit ProcessCrashObserver(eufs::journal::DurableStage target)
-      : target_(target) {}
-
-  // 日志执行器每完成一个持久化阶段就调用该函数。
-  void OnDurableStage(eufs::journal::DurableStage stage) override {
-    // 还没到目标阶段时什么都不做，让事务继续执行。
-    if (stage != target_) {
-      return;
-    }
-    // dprintf 直接写标准错误文件描述符，避免 iostream 缓冲区来不及刷新。
-    ::dprintf(STDERR_FILENO, "eufsd: crash failpoint reached: %s\n",
-              DurableStageName(stage));
-    // _exit 不运行析构函数、不刷新用户态缓冲，模拟进程突然死亡。
-    _exit(200);
-  }
-
- private:
-  // 保存唯一的目标崩溃阶段。
-  eufs::journal::DurableStage target_;
-};
 
 }  // 匿名命名空间：上面的辅助符号只在本源文件内可见。
 
@@ -158,12 +85,13 @@ int main(int argc, char** argv) {
       // 先创建一个待填充的阶段枚举。
       eufs::journal::DurableStage stage{};
       // 消费下一个参数并把字符串解析成阶段枚举。
-      if (!ParseDurableStage(argv[++index], &stage)) {
+      if (!eufs::journal::ParseDurableStage(argv[++index], &stage)) {
         PrintUsage();
         return 2;
       }
       // 创建观察者并用 shared_ptr 管理，因为它会传入日志执行链长期持有。
-      mutation_observer = std::make_shared<ProcessCrashObserver>(stage);
+      mutation_observer =
+          eufs::journal::MakeProcessCrashObserver(stage, "eufsd");
       continue;
     }
 
@@ -175,12 +103,14 @@ int main(int argc, char** argv) {
       eufs::journal::DurableStage stage{};
       // 拒绝重复配置；再解析等号右侧的阶段名称。
       if (mutation_observer != nullptr ||
-          !ParseDurableStage(argument.substr(kCrashPrefix.size()), &stage)) {
+          !eufs::journal::ParseDurableStage(
+              argument.substr(kCrashPrefix.size()), &stage)) {
         PrintUsage();
         return 2;
       }
       // 解析成功后创建故障注入观察者。
-      mutation_observer = std::make_shared<ProcessCrashObserver>(stage);
+      mutation_observer =
+          eufs::journal::MakeProcessCrashObserver(stage, "eufsd");
       continue;
     }
 

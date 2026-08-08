@@ -1,0 +1,4 @@
+W0808 10:15:02.738543  5105     0 /root/brpc-lab/brpc/src/bthread/bthread.cpp:514 bthread_setconcurrency_by_tag] Fail to set concurrency by tag: 0, tag concurrency should be larger than old oncurrency. old concurrency: 9, new concurrency: 4
+I0808 10:15:03.221642  5105     0 /root/brpc-lab/brpc/src/brpc/server.cpp:1252 StartInternal] Server[eufs::rpc::ObjectServiceImpl] is serving on port=8027.
+I0808 10:15:03.315538  5105     0 /root/brpc-lab/brpc/src/brpc/server.cpp:1255 StartInternal] Check out http://localhost.localdomain:8027 in web browser.
+I0808 10:15:19.948122  5105     0 /root/brpc-lab/brpc/src/brpc/server.cpp:1312 Stop] Server[eufs::rpc::ObjectServiceImpl] is going to quit

@@ -159,6 +159,7 @@ target_link_libraries(eufs_ring_reservation PUBLIC eufs_journal_format)
 target_compile_options(eufs_ring_reservation PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(eufs_journal_control_store
+  src/journal/durable_stage_failpoint.cpp
   src/journal/journal_control_store.cpp
   src/journal/journal_recovery.cpp
 )
@@ -342,6 +343,19 @@ target_compile_definitions(eufsd PRIVATE _FILE_OFFSET_BITS=64)
 include(CTest)
 if(BUILD_TESTING)
   enable_testing()
+
+  add_executable(durable_stage_failpoint_test
+    tests/durable_stage_failpoint_test.cpp
+  )
+  target_link_libraries(durable_stage_failpoint_test PRIVATE
+    eufs_journal_control_store
+  )
+  target_compile_options(durable_stage_failpoint_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME durable_stage_failpoint_test
+    COMMAND durable_stage_failpoint_test
+  )
 
   # 下面两个库只用于构造测试镜像和早期恢复场景，不进入 eufsd 产品链路。
   add_library(eufs_first_block_write_plan

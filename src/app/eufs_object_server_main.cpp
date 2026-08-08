@@ -1,4 +1,5 @@
 #include "journal/journal_control_store.h"
+#include "journal/durable_stage_failpoint.h"
 #include "object/object_backend.h"
 #include "rpc/object_service_impl.h"
 
@@ -21,6 +22,8 @@ DEFINE_uint64(max_queued_write_tasks, 128,
 DEFINE_uint64(max_queued_read_tasks, 256,
               "Maximum queued GetObject and StatObject requests");
 DEFINE_uint64(read_workers, 4, "Number of bounded blocking read workers");
+DEFINE_string(crash_after, "",
+              "Test-only durable stage that terminates the server after sync");
 
 int main(int argc, char* argv[]) {
   GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
@@ -31,11 +34,22 @@ int main(int argc, char* argv[]) {
   }
 
   eufs::object_store::ObjectBackendOptions backend_options;
+  std::shared_ptr<eufs::journal::DurableStageObserver> mutation_observer;
+  if (!FLAGS_crash_after.empty()) {
+    eufs::journal::DurableStage stage{};
+    if (!eufs::journal::ParseDurableStage(FLAGS_crash_after, &stage)) {
+      LOG(ERROR) << "invalid --crash_after: " << FLAGS_crash_after;
+      return 2;
+    }
+    mutation_observer = eufs::journal::MakeProcessCrashObserver(
+        stage, "eufs_object_server");
+  }
   std::unique_ptr<eufs::object_store::ObjectBackend> backend;
   eufs::journal::RecoveryAction recovery_action{};
   std::string detail;
   const int open_result = eufs::object_store::ObjectBackend::Open(
-      FLAGS_image, backend_options, &backend, &recovery_action, &detail);
+      FLAGS_image, backend_options, &backend, &recovery_action, &detail,
+      nullptr, nullptr, std::move(mutation_observer));
   if (open_result != 0) {
     LOG(ERROR) << "ObjectBackend open failed: " << detail;
     return 3;

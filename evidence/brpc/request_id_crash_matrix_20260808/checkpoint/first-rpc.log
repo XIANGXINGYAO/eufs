@@ -1,0 +1,2 @@
+rpc_error=1014 detail=[E1014]Got EOF of brpc::Socket{id=0 fd=3 addr=127.0.0.1:8027:55442} (0x34888880)
+I0808 10:16:44.167138  5564 4294969856 /root/brpc-lab/brpc/src/brpc/socket.cpp:2580 CheckHealth] Checking Socket{id=0 addr=127.0.0.1:8027} (0x34888880)

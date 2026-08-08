@@ -18,7 +18,7 @@ C++17、FUSE3 和自定义磁盘格式，重点验证元数据事务、崩溃恢
 - 直接对象后端：`PutIfAbsent/Get/Stat/ReplaceIfVersion`，带版本条件的完整对象替换、
   明确变更结果和 fail-closed，不经 FUSE 数据路径。
 - 可选 brpc 服务：protobuf Request-ID 接口、attachment 数据路径、按并发字节和
-  队列容量背压；端到端 openEuler/brpc 崩溃重试证据仍待补齐。
+  队列容量背压；已完成 openEuler 原生构建和六阶段进程崩溃/Request-ID 重试矩阵。
 
 ## 持久化顺序
 
@@ -48,7 +48,7 @@ cmake --build build -j2
 (cd build && ctest --output-on-failure)
 ```
 
-当前本地基线包含 45 个 CTest 测试。测试覆盖磁盘编解码、bitmap 分配、COW 写计划、
+当前本地基线包含 46 个 CTest 测试。测试覆盖磁盘编解码、bitmap 分配、COW 写计划、
 完整对象新建/替换、日志发布与恢复、挂载会话锁、全局一致性检查、RPC 背压以及
 Request Ledger 编解码和启动扫描。
 
@@ -62,6 +62,17 @@ Request Ledger 编解码和启动扫描。
 ```
 
 这些脚本需要可用的 `/dev/fuse` 和挂载权限。
+
+启用 `EUFS_BUILD_BRPC_SERVICE` 并提供 brpc 构建产物后，可执行真实 RPC 崩溃矩阵：
+
+```bash
+./tests/smoke_brpc_request_id_crash_matrix.sh \
+  ./build-brpc/eufs-mkfs \
+  ./build-brpc/eufs_object_server \
+  ./build-brpc/eufs_object_client \
+  /tmp/eufs-brpc-request-id-crash-matrix \
+  127.0.0.1:8027
+```
 
 ## 代码阅读入口
 
@@ -105,17 +116,18 @@ fusermount3 -u /tmp/eufs-mnt
 - [日志事务格式](docs/eufs_v1_journal_transaction_format.md)
 - [日志发布顺序审计](evidence/research/stage-d-journal-publication-order-audit-20260722.md)
 - [openEuler 集成审计](evidence/research/openeuler-integration-audit-20260710.md)
+- [openEuler brpc Request-ID 六阶段崩溃矩阵](evidence/brpc/request_id_crash_matrix_20260808/summary.log)
 - `evidence/debug/`：真实缺陷定位记录
 
-每次 push 和 pull request 都由 GitHub Actions 重新构建并执行 CTest。本地原始日志不进入
-源码历史，避免用不可独立复核的旧输出代替可重复测试。
+每次 push 和 pull request 都由 GitHub Actions 重新构建并执行 CTest。普通本地测试以
+可重复脚本为准；CI 暂不具备的 openEuler/brpc 环境只选择性保留端到端原始证据。
 
 ## 已知边界
 
 - 已证明的挂载写原子单位是一次实际 FUSE write callback，不是整个用户态
   `write(2)`/`pwrite(2)` 系统调用；内核可能按页边界拆分请求。
-- brpc 服务的 Request-ID 协议和 Backend 状态机已经接入；尚未完成 EUFS-brpc
-  端到端构建证据、bvar/压测和真实客户端超时重试故障注入。
+- brpc 服务已经完成 openEuler 端到端构建和受控进程崩溃后的客户端重试证据；
+  尚未完成 bvar、压测以及网络分区/丢包故障注入。
 - 当前持久化语义只能宣称 ledger 保留期间的 at-most-once mutation effect 与确定性
   replay，不宣称网络 exactly-once。
 - 当前尚未实现 Delete/tombstone，版本令牌不宣称覆盖 delete/recreate ABA。
