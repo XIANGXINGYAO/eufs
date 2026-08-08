@@ -1,7 +1,9 @@
+// 自检 tests/support 中的直接落盘辅助器能否忠实应用 planner 生成的块镜像。
+// 该辅助器只构造测试前置状态，不参与 eufsd 产品链接。
 #include "metadata/empty_file_create_plan.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <array>
 #include <cerrno>

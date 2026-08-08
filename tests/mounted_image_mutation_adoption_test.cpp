@@ -1,9 +1,11 @@
+// 验证同一 MountedImageSession 派生的 mutation fd 可执行测试写入且继续共享独占锁。
+// 测试防止写路径重新按路径打开镜像，从而绕过挂载会话的单写者边界。
 #include "metadata/empty_file_create_plan.h"
-#include "metadata/first_block_write_plan.h"
+#include "tests/support/first_block_write_plan.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
 #include "storage/mounted_image_session.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <cerrno>
 #include <cstdlib>

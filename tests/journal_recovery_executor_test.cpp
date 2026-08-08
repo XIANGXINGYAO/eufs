@@ -1,10 +1,12 @@
+// 把分类后的已提交事务真正回放到 home blocks，并验证重复恢复仍得到同一结果。
+// 该测试覆盖 replay、checkpoint 和 before-image 冲突时的 fail-closed 行为。
 #include "journal/journal_control_store.h"
 #include "metadata/empty_file_create_plan.h"
-#include "metadata/first_block_write_plan.h"
+#include "tests/support/first_block_write_plan.h"
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>

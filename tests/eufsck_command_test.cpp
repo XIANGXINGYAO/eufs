@@ -1,3 +1,5 @@
+// 验证 eufsck 命令层把扫描结论映射为稳定的输出、退出码和挂载拒绝语义。
+// 它测试 CLI 契约，不重复测试底层每一种损坏识别算法。
 #include "checker/eufsck_command.h"
 #include "journal/ondisk_journal.h"
 #include "metadata/ondisk_format.h"

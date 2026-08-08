@@ -1,8 +1,10 @@
+// 把测试专用单块写计划直接应用到临时镜像，验证测试构造器确实生成预期磁盘状态。
+// 它是恢复测试的 fixture 自检，不是 eufsd 当前在线写路径。
 #include "metadata/empty_file_create_plan.h"
-#include "metadata/first_block_write_plan.h"
+#include "tests/support/first_block_write_plan.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>

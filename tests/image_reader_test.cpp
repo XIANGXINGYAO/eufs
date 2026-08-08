@@ -1,3 +1,5 @@
+// 验证 ImageReader 对 superblock、control、bitmap、inode、目录和文件内容的只读解析契约。
+// 损坏输入必须返回明确错误，不能越界、短读后继续解析或接受不支持的格式特性。
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"

@@ -20,5 +20,6 @@
 
 # Reproducible command output belongs in CI artifacts, not source history.
 /evidence/build/*.log
+/evidence/brpc/*.log
 /evidence/runtime/*.log
 /evidence/runtime/*.txt

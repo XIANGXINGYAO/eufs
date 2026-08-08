@@ -1,10 +1,12 @@
+// 让文件写入跨过 direct block 边界进入 single-indirect，再在事务阶段注入恢复场景。
+// 验证数据块、间接索引块和 inode 元数据在崩溃后只能整体采用或整体丢弃。
 #include "checker/consistency_checker.h"
 #include "journal/journal_control_store.h"
 #include "metadata/empty_file_create_plan.h"
 #include "metadata/file_write_plan.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>

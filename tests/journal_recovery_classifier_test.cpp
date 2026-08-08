@@ -1,3 +1,5 @@
+// 向 ring 写入完整、截断、冲突和校验失败的事务组合，验证恢复分类决策。
+// 分类器只依据持久化证据决定丢弃、重放或拒绝挂载，不修改 home block。
 #include "journal/journal_control_store.h"
 #include "journal/ondisk_journal.h"
 #include "journal/ring_reservation.h"

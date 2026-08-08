@@ -1,9 +1,11 @@
+// 验证早期单块写测试计划只允许空 inode 的第一次分配，并生成完整块镜像集合。
+// 该代码已隔离在 tests/support，保留它是为了复现历史恢复边界。
 #include "metadata/empty_file_create_plan.h"
-#include "metadata/first_block_write_plan.h"
+#include "tests/support/first_block_write_plan.h"
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>

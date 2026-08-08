@@ -1,3 +1,5 @@
+// 对 descriptor、payload、commit 和 A/B control 做编码/解码与校验和边界测试。
+// 它只验证日志磁盘格式，不验证实际 fsync 顺序或 home replay。
 #include "journal/ondisk_journal.h"
 
 #include <array>

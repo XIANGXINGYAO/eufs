@@ -34,11 +34,13 @@ ObjectBackend::ObjectBackend(
     ObjectBackendOptions options,
     std::unique_ptr<storage::MountedImageSession> session,
     std::unique_ptr<storage::ImageReader> reader,
+    std::unique_ptr<RequestLedgerIndex> request_ledger,
     std::shared_ptr<journal::JournalControlIo> mutation_io,
     std::shared_ptr<journal::DurableStageObserver> mutation_observer)
     : options_(options),
       session_(std::move(session)),
       reader_(std::move(reader)),
+      request_ledger_(std::move(request_ledger)),
       mutation_io_(std::move(mutation_io)),
       mutation_observer_(std::move(mutation_observer)) {}
 
@@ -104,9 +106,21 @@ int ObjectBackend::Open(
     return result;
   }
 
+  // feature 声明的是强制启动契约：路径、记录前缀或索引任一损坏都拒绝发布 Backend。
+  std::unique_ptr<RequestLedgerIndex> request_ledger;
+  if ((reader->superblock().feature_incompat &
+       ondisk::kFeatureIncompatRequestLedger) != 0) {
+    auto candidate = std::make_unique<RequestLedgerIndex>();
+    result = ScanRequestLedger(*reader, candidate.get(), detail);
+    if (result != 0) {
+      return result;
+    }
+    request_ledger = std::move(candidate);
+  }
+
   // 所有阶段成功后才发布 Backend，并把实际恢复动作返回上层记录。
   output->reset(new ObjectBackend(options, std::move(session),
-                                  std::move(reader),
+                                  std::move(reader), std::move(request_ledger),
                                   std::move(mutation_io),
                                   std::move(mutation_observer)));
   *recovery_action = action;
@@ -213,13 +227,28 @@ int ObjectBackend::ApplyLocked(
 int ObjectBackend::PutIfAbsent(std::string_view name, std::string_view data,
                                std::uint64_t timestamp_ns,
                                std::string* detail) {
+  MutationResult ignored;
+  return PutIfAbsent(name, data, timestamp_ns, &ignored, detail);
+}
+
+// 与条件替换一样，把 errno 和持久化结果分开返回，供远程调用决定能否安全重试。
+int ObjectBackend::PutIfAbsent(std::string_view name, std::string_view data,
+                               std::uint64_t timestamp_ns,
+                               MutationResult* output,
+                               std::string* detail) {
   if (detail != nullptr) {
     detail->clear();
   }
+  if (output == nullptr) {
+    SetDetail(detail, "creation result output is required");
+    return -EINVAL;
+  }
+  MutationResult candidate;
   // 锁从检查旧命名空间一直持有到 COMMIT、checkpoint 和 reader 重建完成。
-  const std::lock_guard<std::mutex> lock(mutex_);
+  const std::unique_lock<std::shared_mutex> lock(mutex_);
   int result = CheckUsableLocked(detail);
   if (result != 0) {
+    *output = candidate;
     return result;
   }
 
@@ -229,12 +258,30 @@ int ObjectBackend::PutIfAbsent(std::string_view name, std::string_view data,
       *reader_, name, data, options_.permissions, options_.uid, options_.gid,
       timestamp_ns, &plan, detail);
   if (result != 0) {
+    if (result == -EEXIST) {
+      std::uint32_t inode_number = 0;
+      ondisk::InodeRecord inode;
+      std::string ignored_detail;
+      if (ResolveRegularLocked(name, &inode_number, &inode,
+                               &ignored_detail) == 0) {
+        candidate.current_version =
+            ObjectVersion{inode_number, inode.generation};
+      }
+    }
+    *output = candidate;
     return result;
   }
-  MutationOutcome ignored_outcome = MutationOutcome::kNotApplied;
-  return ApplyLocked(plan.before_images, plan.ordered_data_after_images,
-                     plan.metadata_after_images, plan.total_blocks,
-                     plan.filesystem_uuid, &ignored_outcome, detail);
+  result = ApplyLocked(plan.before_images, plan.ordered_data_after_images,
+                       plan.metadata_after_images, plan.total_blocks,
+                       plan.filesystem_uuid, &candidate.outcome, detail);
+  if (candidate.outcome == MutationOutcome::kCommitted) {
+    candidate.committed_version = ObjectVersion{plan.inode_number, 1};
+    candidate.current_version = candidate.committed_version;
+  } else if (candidate.outcome == MutationOutcome::kUnknown) {
+    candidate.current_version = ObjectVersion{};
+  }
+  *output = candidate;
+  return result;
 }
 
 // 对完整对象执行带版本条件的全量替换，避免两个并发写者互相静默覆盖。
@@ -254,7 +301,7 @@ int ObjectBackend::ReplaceIfVersion(std::string_view name,
   MutationResult candidate;
 
   // 同一把锁覆盖查找、版本检查、规划、提交和 reader 重建，形成一次线性化操作。
-  const std::lock_guard<std::mutex> lock(mutex_);
+  const std::unique_lock<std::shared_mutex> lock(mutex_);
   int result = CheckUsableLocked(detail);
   if (result != 0) {
     *output = candidate;
@@ -304,14 +351,20 @@ int ObjectBackend::ReplaceIfVersion(std::string_view name,
 // 读取完整对象；不像 POSIX read，它没有 offset/size 分段接口。
 int ObjectBackend::Get(std::string_view name, std::string* output,
                        std::string* detail) {
+  ObjectStat ignored_stat;
+  return Get(name, output, &ignored_stat, detail);
+}
+
+int ObjectBackend::Get(std::string_view name, std::string* output,
+                       ObjectStat* stat, std::string* detail) {
   if (detail != nullptr) {
     detail->clear();
   }
-  if (output == nullptr) {
-    SetDetail(detail, "object data output is required");
+  if (output == nullptr || stat == nullptr) {
+    SetDetail(detail, "object data and stat outputs are required");
     return -EINVAL;
   }
-  const std::lock_guard<std::mutex> lock(mutex_);
+  const std::shared_lock<std::shared_mutex> lock(mutex_);
   int result = CheckUsableLocked(detail);
   if (result != 0) {
     return result;
@@ -346,6 +399,7 @@ int ObjectBackend::Get(std::string_view name, std::string* output,
   }
   // 完整成功后一次性移动给调用者。
   *output = std::move(candidate);
+  *stat = MakeObjectStat(inode_number, inode);
   return 0;
 }
 
@@ -359,7 +413,7 @@ int ObjectBackend::Stat(std::string_view name, ObjectStat* output,
     SetDetail(detail, "object stat output is required");
     return -EINVAL;
   }
-  const std::lock_guard<std::mutex> lock(mutex_);
+  const std::shared_lock<std::shared_mutex> lock(mutex_);
   int result = CheckUsableLocked(detail);
   if (result != 0) {
     return result;
@@ -377,7 +431,7 @@ int ObjectBackend::Stat(std::string_view name, ObjectStat* output,
 
 // 线程安全查询当前 Backend 是否仍可服务。
 bool ObjectBackend::usable() const {
-  const std::lock_guard<std::mutex> lock(mutex_);
+  const std::shared_lock<std::shared_mutex> lock(mutex_);
   return fatal_error_ == 0 && session_ != nullptr && reader_ != nullptr;
 }
 

@@ -1,3 +1,5 @@
+// 把新文件和新目录事务置于不同崩溃阶段，验证恢复后命名空间不存在半创建对象。
+// 每个结果还要通过 ImageReader 和 consistency checker 双重验证。
 #include "checker/consistency_checker.h"
 #include "journal/journal_control_store.h"
 #include "metadata/new_object_plan.h"

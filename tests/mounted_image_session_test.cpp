@@ -1,3 +1,5 @@
+// 验证 MountedImageSession 独占打开、复制 fd、锁冲突和 RAII 关闭语义。
+// 这是在线 reader、journal store 和 FUSE 写回调共享同一挂载所有权的基础。
 #include "storage/mounted_image_session.h"
 
 #include <array>

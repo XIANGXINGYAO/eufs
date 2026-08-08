@@ -1,10 +1,12 @@
+// 构造 bitmap 中已分配但没有目录路径可达的 inode，验证孤儿对象检测。
+// 该测试确保“磁盘上存在”和“命名空间可达”不会被错误地合并。
 #include "checker/consistency_checker.h"
 #include "metadata/empty_file_create_plan.h"
-#include "metadata/first_block_write_plan.h"
+#include "tests/support/first_block_write_plan.h"
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>

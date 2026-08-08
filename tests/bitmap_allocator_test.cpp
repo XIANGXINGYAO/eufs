@@ -1,3 +1,5 @@
+// 验证 bitmap 分配器只选择空闲位，并正确处理保留区、越界和空间耗尽。
+// 这些断言保护 metadata planner 的最底层资源分配前提。
 #include "storage/bitmap_allocator.h"
 
 #include <array>

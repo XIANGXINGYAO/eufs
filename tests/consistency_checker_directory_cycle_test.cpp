@@ -1,10 +1,12 @@
+// 构造目录环和异常父子关系，验证命名空间遍历有访问集保护且能继续收集其他错误。
+// 该测试防止损坏目录让 eufsck 死循环或过早停止全局扫描。
 #include "checker/consistency_checker.h"
 #include "metadata/empty_file_create_plan.h"
-#include "metadata/first_block_write_plan.h"
+#include "tests/support/first_block_write_plan.h"
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>

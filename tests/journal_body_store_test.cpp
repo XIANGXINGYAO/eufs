@@ -1,3 +1,5 @@
+// 验证 ordered data 先持久化，随后 descriptor 和 payload 写入尚未暴露的日志 ring。
+// 在 control 更新前，恢复程序必须仍只看到旧事务边界。
 #include "journal/journal_control_store.h"
 #include "journal/ondisk_journal.h"
 #include "journal/ring_reservation.h"

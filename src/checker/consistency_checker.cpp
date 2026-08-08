@@ -1,6 +1,7 @@
 #include "checker/consistency_checker.h"
 
 #include "journal/ondisk_journal.h"
+#include "object/request_ledger_format.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -22,6 +23,7 @@
 namespace eufs::checker {
 namespace {
 
+// fd 的 RAII 所有者，确保扫描任意提前返回都会关闭镜像。
 class UniqueFd {
  public:
   explicit UniqueFd(int fd) : fd_(fd) {}
@@ -55,6 +57,7 @@ void SetSystemDetail(std::string* detail, std::string_view operation,
   }
 }
 
+// 完整读取固定磁盘区域，处理 offset 上溢、EINTR 和短读。
 int PreadAll(int fd, std::uint8_t* output, std::size_t size,
              std::uint64_t offset, std::string* detail) {
   if (offset > static_cast<std::uint64_t>(
@@ -95,6 +98,7 @@ std::uint32_t GetLe32(const std::uint8_t* input) {
   return value;
 }
 
+// 把一条结构化问题追加到报告；发现问题不等于立即停止扫描。
 void AddIssue(ConsistencyReport* report, IssueCode code,
               std::uint32_t inode_number, std::uint32_t block_number,
               std::uint32_t related_inode_number, std::string_view detail) {
@@ -103,6 +107,7 @@ void AddIssue(ConsistencyReport* report, IssueCode code,
                                       std::string(detail)});
 }
 
+// 绕过高层 reader，按 inode table 物理位置读取单个 inode，便于局部损坏后继续扫描。
 int ReadRawInode(int fd, const ondisk::Superblock& superblock,
                  std::uint32_t inode_number, ondisk::InodeRecord* output,
                  std::string* detail) {
@@ -127,6 +132,7 @@ int ReadRawInode(int fd, const ondisk::Superblock& superblock,
   return 0;
 }
 
+// DFS 三色状态用于检测目录图中的回边环。
 enum class DirectoryVisitState {
   kUnseen,
   kActive,
@@ -149,6 +155,7 @@ struct ClearBitSummary {
   std::uint64_t count{0};
 };
 
+// 聚合 bitmap 尾部/保留区多个清零位，避免每个位产生一条报告。
 std::optional<ClearBitSummary> SummarizeClearBits(
     const std::vector<std::uint8_t>& bitmap, std::uint64_t begin,
     std::uint64_t end) {
@@ -175,6 +182,7 @@ void AddBitmapIssue(ConsistencyReport* report, IssueCode code,
   report->issues.push_back(std::move(issue));
 }
 
+// 目录项 file_type 必须与目标 inode.mode 一致。
 bool DirectoryTypeMatchesMode(ondisk::DirectoryFileType type,
                               std::uint32_t mode) {
   if (type == ondisk::DirectoryFileType::kRegular) {
@@ -186,8 +194,9 @@ bool DirectoryTypeMatchesMode(ondisk::DirectoryFileType type,
   return false;
 }
 
-}  // namespace
+}  // 匿名命名空间：扫描辅助类型和函数不对外暴露。
 
+// 执行离线只读全局扫描；局部结构损坏记录问题并尽量继续其他独立区域。
 int CheckImage(const std::string& image_path, ConsistencyReport* output,
                std::string* detail) {
   if (detail != nullptr) {
@@ -197,8 +206,10 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     SetDetail(detail, "必须提供镜像路径和一致性报告输出");
     return -EINVAL;
   }
+  // 每次扫描先重置报告，失败时不会混入调用者旧结果。
   *output = ConsistencyReport{};
 
+  // 使用共享非阻塞 flock：允许其他只读检查，拒绝与在线写者并发。
   const int raw_fd = open(image_path.c_str(), O_RDONLY | O_CLOEXEC);
   if (raw_fd < 0) {
     const int error_number = errno;
@@ -219,6 +230,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     return -error_number;
   }
 
+  // superblock 是所有物理偏移的根，损坏时无法安全继续任何局部扫描。
   ondisk::Block superblock_bytes{};
   int result = PreadAll(fd.get(), superblock_bytes.data(),
                         superblock_bytes.size(), 0, detail);
@@ -229,6 +241,17 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
   if (!ondisk::DecodeSuperblock(superblock_bytes, &superblock, detail)) {
     return -EUCLEAN;
   }
+  if ((superblock.feature_incompat &
+       ~ondisk::kSupportedFeatureIncompat) != 0) {
+    SetDetail(detail, "镜像要求当前 eufsck 不支持的不兼容特性");
+    return -EOPNOTSUPP;
+  }
+  output->request_ledger_feature_enabled =
+      (superblock.feature_incompat &
+       ondisk::kFeatureIncompatRequestLedger) != 0;
+  // 不声明 feature 的旧镜像没有 ledger 证据义务，因此该阶段视为不适用且完整。
+  output->request_ledger_scan_complete =
+      !output->request_ledger_feature_enabled;
   const std::uint64_t expected_size =
       static_cast<std::uint64_t>(superblock.total_blocks) *
       ondisk::kBlockSize;
@@ -237,6 +260,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     return -EUCLEAN;
   }
 
+  // journal 非空时必须先由 eufsd 恢复；eufsck 不擅自决定回放或丢弃。
   ondisk::Block control_a{};
   ondisk::Block control_b{};
   const std::uint64_t control_a_offset =
@@ -270,6 +294,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     return 0;
   }
 
+  // bitmap 几何扫描独立于 inode/目录可达性，先收集保留前缀和尾部证据。
   std::vector<std::uint8_t> inode_bitmap(
       static_cast<std::size_t>(superblock.inode_bitmap.block_count) *
       ondisk::kBlockSize);
@@ -328,6 +353,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
              0, "superblock 指定的根 inode 在 inode 位图中未置位");
   }
 
+  // 物理扫描集合由“bitmap 已分配 inode + 目录项发现 inode + 根 inode”并集组成。
   std::set<std::uint32_t> physical_scan;
   std::deque<std::uint32_t> physical_scan_queue;
   const auto enqueue_physical_scan = [&](std::uint32_t inode_number) {
@@ -343,6 +369,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     }
   }
 
+  // 以下容器分别保存物理解码、目录图、块引用和发现来源，不能混成一个可达标志。
   output->status = ScanStatus::kComplete;
   std::set<std::uint32_t> attempted_inodes;
   std::map<std::uint32_t, ondisk::InodeRecord> decoded_inodes;
@@ -358,6 +385,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
   bool block_reference_scan_complete = true;
   bool inode_reference_scan_complete = true;
 
+  // 注册每个块引用，同时检查数据区范围、bitmap 和重复引用。
   const auto register_block_reference =
       [&](std::uint32_t block_number, std::uint32_t inode_number,
           std::uint32_t logical_block, BlockReferenceKind kind,
@@ -391,6 +419,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
         return true;
       };
 
+  // 队列持续扩展：即使目录项指向 bitmap 未置位 inode，也尝试读取以保留更多证据。
   while (!physical_scan_queue.empty()) {
     const std::uint32_t inode_number = physical_scan_queue.front();
     physical_scan_queue.pop_front();
@@ -398,6 +427,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
       continue;
     }
 
+    // inode 解码失败只终止该 inode 的内部扫描，不终止其他 inode。
     ondisk::InodeRecord inode;
     std::string inode_detail;
     result = ReadRawInode(fd.get(), superblock, inode_number, &inode,
@@ -441,6 +471,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
           DiscoveredInode{inode_number, bitmap_allocated, inode});
     }
 
+    // 根据 size 分别检查 direct 与 single-indirect 必需/多余指针。
     const std::uint32_t required_blocks = static_cast<std::uint32_t>(
         (inode.size + ondisk::kBlockSize - 1U) / ondisk::kBlockSize);
     std::vector<std::optional<std::uint32_t>> logical_blocks(required_blocks);
@@ -535,6 +566,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     }
     inode_logical_blocks.emplace(inode_number, std::move(logical_blocks));
 
+    // 目录块逐条按 record_length 解码；坏 record 无法计算下一位置，只停止当前块。
     if (!S_ISDIR(inode.mode)) {
       continue;
     }
@@ -628,6 +660,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     directory_scan_complete[inode_number] = this_directory_complete;
   }
 
+  // 只有块引用证据完整时，才能把“bitmap 已分配但无人引用”判为孤块。
   output->block_reference_scan_complete = block_reference_scan_complete;
   if (output->block_reference_scan_complete) {
     for (std::uint32_t block_number = superblock.data.start_block;
@@ -649,6 +682,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     }
   }
 
+  // link_count 从目录项引用数和子目录数独立推导，证据不完整时不做强结论。
   std::map<std::uint32_t, std::uint64_t> observed_dentry_references;
   std::map<std::uint32_t, std::uint64_t> observed_child_directories;
   for (const DirectoryEntryObservation& observation :
@@ -718,6 +752,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     }
   }
 
+  // 在完整已解码目录图上执行三色 DFS 检测目录环。
   std::map<std::uint32_t, DirectoryVisitState> directory_visit_state;
   const auto is_decoded_directory = [&](std::uint32_t inode_number) {
     const auto inode_it = decoded_inodes.find(inode_number);
@@ -761,6 +796,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     }
   }
 
+  // v1 不支持目录硬链接，因此同一目录 inode 出现第二个父边即报告问题。
   std::set<std::uint32_t> linked_directories;
   for (const DirectoryEdge& edge : output->directory_edges) {
     if (!is_decoded_directory(edge.child_inode_number)) {
@@ -773,6 +809,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     }
   }
 
+  // 根可达性单独从根目录做 BFS，绝不因物理扫描发现 inode 就标记为可达。
   std::set<std::uint32_t> root_reachable;
   std::deque<std::uint32_t> reachability_queue;
   root_reachable.insert(superblock.root_inode);
@@ -808,6 +845,7 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     }
   }
 
+  // 只有根 BFS 经过的所有目录都完整解码，才能可靠判定不可达 inode。
   output->root_reachability_complete = root_reachability_complete;
   if (output->root_reachability_complete) {
     for (std::uint32_t inode_number = 1;
@@ -821,6 +859,184 @@ int CheckImage(const std::string& image_path, ConsistencyReport* output,
     }
   }
 
+  // Request Ledger 是 feature bit 0 声明的系统文件。服务启动扫描遇错即停，
+  // eufsck 则继续读取所有仍可定位的槽位，分别保存每一种矛盾。
+  if (output->request_ledger_feature_enabled) {
+    using object_store::LedgerDecodeStatus;
+    using object_store::RequestId;
+    using object_store::RequestLedgerBytes;
+    using object_store::RequestLedgerRecord;
+
+    const auto add_ledger_issue =
+        [&](IssueCode code, std::uint32_t block_number,
+            std::uint64_t slot, std::string_view issue_detail) {
+          CheckIssue issue{code,
+                           object_store::kRequestLedgerInodeNumber,
+                           block_number,
+                           0,
+                           std::string(issue_detail)};
+          issue.ledger_slot = slot;
+          output->issues.push_back(std::move(issue));
+        };
+
+    bool ledger_evidence_complete = true;
+    const auto root_scan_it = directory_scan_complete.find(
+        superblock.root_inode);
+    const bool root_directory_complete =
+        root_scan_it != directory_scan_complete.end() &&
+        root_scan_it->second;
+    std::vector<const ondisk::DirectoryEntry*> ledger_entries;
+    for (const ondisk::DirectoryEntry& entry : output->root_entries) {
+      if (entry.name == object_store::kRequestLedgerName) {
+        ledger_entries.push_back(&entry);
+      }
+    }
+    if (!root_directory_complete) {
+      add_ledger_issue(
+          IssueCode::kRequestLedgerIdentityInvalid, 0, 0,
+          "根目录未完整解码，无法完整确认固定 ledger 名称的唯一身份");
+      ledger_evidence_complete = false;
+    } else if (ledger_entries.size() != 1U ||
+               ledger_entries.front()->inode !=
+                   object_store::kRequestLedgerInodeNumber ||
+               ledger_entries.front()->file_type !=
+                   ondisk::DirectoryFileType::kRegular) {
+      add_ledger_issue(
+          IssueCode::kRequestLedgerIdentityInvalid, 0, 0,
+          "根目录必须恰有一个 .eufs.request-ledger，并指向普通文件 inode 2");
+    }
+
+    const auto inode_it =
+        decoded_inodes.find(object_store::kRequestLedgerInodeNumber);
+    if (inode_it == decoded_inodes.end()) {
+      add_ledger_issue(IssueCode::kRequestLedgerIdentityInvalid, 0, 0,
+                       "固定 ledger inode 2 无法解码");
+      ledger_evidence_complete = false;
+    } else {
+      const ondisk::InodeRecord& ledger_inode = inode_it->second;
+      const bool inode_allocated = BitmapBit(
+          inode_bitmap, object_store::kRequestLedgerInodeNumber - 1U);
+      if (!inode_allocated) {
+        add_ledger_issue(IssueCode::kRequestLedgerIdentityInvalid, 0, 0,
+                         "固定 ledger inode 2 在 inode bitmap 中未分配");
+      }
+      if (!S_ISREG(ledger_inode.mode) || ledger_inode.link_count != 1U) {
+        add_ledger_issue(
+            IssueCode::kRequestLedgerGeometryInvalid, 0, 0,
+            "ledger inode 必须是 link_count=1 的普通文件");
+      }
+
+      const bool readable_geometry =
+          ledger_inode.size != 0 &&
+          ledger_inode.size <= ondisk::kMaxFileSize &&
+          ledger_inode.size % ondisk::kBlockSize == 0 &&
+          ledger_inode.size % object_store::kRequestLedgerRecordSize == 0;
+      if (!readable_geometry) {
+        add_ledger_issue(
+            IssueCode::kRequestLedgerGeometryInvalid, 0, 0,
+            "ledger 大小必须是非零 4 KiB 整块，且不能超过 v1 最大文件");
+        ledger_evidence_complete = false;
+      } else {
+        output->request_ledger_capacity =
+            ledger_inode.size / object_store::kRequestLedgerRecordSize;
+        const std::uint32_t ledger_blocks = static_cast<std::uint32_t>(
+            ledger_inode.size / ondisk::kBlockSize);
+        const auto mappings_it = inode_logical_blocks.find(
+            object_store::kRequestLedgerInodeNumber);
+        if (mappings_it == inode_logical_blocks.end() ||
+            mappings_it->second.size() != ledger_blocks) {
+          add_ledger_issue(
+              IssueCode::kRequestLedgerBlockUnavailable, 0, 0,
+              "无法取得与 ledger 文件大小一致的逻辑块映射");
+          ledger_evidence_complete = false;
+        } else {
+          constexpr std::size_t kEntriesPerBlock =
+              ondisk::kBlockSize /
+              object_store::kRequestLedgerRecordSize;
+          bool saw_empty = false;
+          std::set<RequestId> request_ids;
+          for (std::uint32_t logical = 0; logical < ledger_blocks;
+               ++logical) {
+            if (!mappings_it->second[logical].has_value()) {
+              add_ledger_issue(
+                  IssueCode::kRequestLedgerBlockUnavailable, 0,
+                  static_cast<std::uint64_t>(logical) *
+                          kEntriesPerBlock +
+                      1U,
+                  "ledger 逻辑块没有可验证的物理映射");
+              ledger_evidence_complete = false;
+              continue;
+            }
+            const std::uint32_t physical =
+                *mappings_it->second[logical];
+            ondisk::Block block{};
+            result = PreadAll(
+                fd.get(), block.data(), block.size(),
+                static_cast<std::uint64_t>(physical) *
+                    ondisk::kBlockSize,
+                detail);
+            if (result != 0) {
+              return result;
+            }
+
+            for (std::size_t local = 0; local < kEntriesPerBlock;
+                 ++local) {
+              const std::uint64_t slot =
+                  static_cast<std::uint64_t>(logical) *
+                      kEntriesPerBlock +
+                  local + 1U;
+              RequestLedgerBytes bytes{};
+              std::copy_n(
+                  block.begin() +
+                      local * object_store::kRequestLedgerRecordSize,
+                  bytes.size(), bytes.begin());
+              ++output->request_ledger_slots_scanned;
+
+              RequestLedgerRecord record;
+              std::string decode_detail;
+              const LedgerDecodeStatus decode_status =
+                  object_store::DecodeRequestLedgerRecord(
+                      bytes, slot, &record, &decode_detail);
+              if (decode_status == LedgerDecodeStatus::kCorrupt) {
+                add_ledger_issue(IssueCode::kRequestLedgerSlotCorrupt,
+                                 physical, slot, decode_detail);
+                continue;
+              }
+              if (decode_status == LedgerDecodeStatus::kEmpty) {
+                ++output->request_ledger_empty_slots;
+                saw_empty = true;
+                continue;
+              }
+
+              ++output->request_ledger_valid_records;
+              if (saw_empty) {
+                add_ledger_issue(
+                    IssueCode::kRequestLedgerRecordAfterHole,
+                    physical, slot,
+                    "合法记录出现在此前已经观察到的全零空槽之后");
+              }
+              if (!request_ids.insert(record.request_id).second) {
+                add_ledger_issue(
+                    IssueCode::kRequestLedgerDuplicateRequestId,
+                    physical, slot,
+                    "同一个 Request-ID 在多个合法槽位中出现");
+              }
+            }
+          }
+        }
+      }
+    }
+
+    output->request_ledger_scan_complete =
+        ledger_evidence_complete &&
+        output->request_ledger_slots_scanned ==
+            output->request_ledger_capacity;
+    if (!output->request_ledger_scan_complete) {
+      output->status = ScanStatus::kPartial;
+    }
+  }
+
+  // 最后把内部集合转成稳定排序的结构化报告字段。
   output->physical_scan_inode_numbers.assign(physical_scan.begin(),
                                               physical_scan.end());
   output->root_reachable_inode_numbers.assign(root_reachable.begin(),

@@ -1,3 +1,5 @@
+// 验证 JournalControlStore 接管会话复制 fd 后仍处于同一个独占锁所有权范围。
+// store 关闭派生 fd 时不能让另一个进程提前取得镜像写锁。
 #include "journal/journal_control_store.h"
 #include "storage/mkfs.h"
 #include "storage/mounted_image_session.h"

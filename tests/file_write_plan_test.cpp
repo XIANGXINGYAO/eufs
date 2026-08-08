@@ -1,8 +1,10 @@
+// 覆盖覆盖写、追加写、稀疏扩展、direct 与 single-indirect 分配等通用写计划。
+// 重点验证 before image、ordered data 和 metadata after image 的分类及边界检查。
 #include "metadata/empty_file_create_plan.h"
 #include "metadata/file_write_plan.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>
@@ -12,6 +14,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -54,7 +57,9 @@ std::uint32_t GetLe32(const std::uint8_t* input) {
          (static_cast<std::uint32_t>(input[3]) << 24U);
 }
 
-void CreateEmptyFile(const std::string& path, std::uint64_t image_size) {
+void CreateEmptyFile(
+    const std::string& path, std::uint64_t image_size,
+    std::uint64_t generation = 1) {
   eufs::storage::MkfsOptions options;
   options.image_path = path;
   options.image_size_bytes = image_size;
@@ -71,6 +76,28 @@ void CreateEmptyFile(const std::string& path, std::uint64_t image_size) {
   Require(eufs::metadata::PrepareRootEmptyFileCreate(
               *reader, "a.txt", 0644, 1000, 1000, 10, &create, &detail) == 0,
           detail.c_str());
+  if (generation != 1) {
+    const auto& superblock = reader->superblock();
+    const std::uint64_t byte_index =
+        static_cast<std::uint64_t>(create.inode_number - 1U) *
+        eufs::ondisk::kInodeRecordSize;
+    const std::uint32_t table_block =
+        superblock.inode_table.start_block +
+        static_cast<std::uint32_t>(byte_index / eufs::ondisk::kBlockSize);
+    const std::size_t offset =
+        static_cast<std::size_t>(byte_index % eufs::ondisk::kBlockSize);
+    eufs::ondisk::InodeBytes bytes{};
+    std::copy_n(create.after_images.at(table_block).begin() + offset,
+                bytes.size(), bytes.begin());
+    eufs::ondisk::InodeRecord inode;
+    Require(eufs::ondisk::DecodeInode(bytes, create.inode_number, &inode,
+                                      &detail),
+            detail.c_str());
+    inode.generation = generation;
+    Require(eufs::ondisk::EncodeInode(inode, &bytes, &detail), detail.c_str());
+    std::copy(bytes.begin(), bytes.end(),
+              create.after_images.at(table_block).begin() + offset);
+  }
   reader.reset();
   Require(eufs::storage::ApplyCreatePlan(path, create, &detail) == 0,
           detail.c_str());
@@ -172,7 +199,10 @@ void TestOverwriteAndIndirectCow() {
   eufs::metadata::FileWritePlan initial_plan;
   Require(eufs::metadata::PrepareFileWrite(
               *reader, 2, 0, initial, 20, &initial_plan, &detail) == 0 &&
-              initial_plan.ordered_data_after_images.size() == 2,
+              initial_plan.ordered_data_after_images.size() == 2 &&
+              initial_plan.old_generation == 1 &&
+              initial_plan.new_generation == 2 &&
+              PlannedInode(*reader, initial_plan).generation == 2,
           detail.c_str());
   reader.reset();
   Require(eufs::storage::ApplyFileWritePlan(path, initial_plan, &detail) == 0,
@@ -180,7 +210,8 @@ void TestOverwriteAndIndirectCow() {
 
   reader = OpenReader(path);
   const auto old_inode = ReadFileInode(*reader);
-  Require(ReadAll(*reader) == initial, "initial multi-block write was incorrect");
+  Require(ReadAll(*reader) == initial && old_inode.generation == 2,
+          "initial write did not publish content and generation together");
   const std::set<std::uint32_t> old_blocks = {old_inode.direct_blocks[0],
                                                old_inode.direct_blocks[1]};
 
@@ -193,9 +224,13 @@ void TestOverwriteAndIndirectCow() {
               *reader, 2, 3500, payload, 30, &overwrite, &detail) == 0,
           detail.c_str());
   Require(overwrite.old_size == 6000 && overwrite.new_size == 8500 &&
-              overwrite.ordered_data_after_images.size() == 3,
+              overwrite.ordered_data_after_images.size() == 3 &&
+              overwrite.old_generation == 2 &&
+              overwrite.new_generation == 3,
           "overwrite plan has the wrong size or COW block count");
   const auto overwrite_inode = PlannedInode(*reader, overwrite);
+  Require(overwrite_inode.generation == 3,
+          "partial write did not advance the shared content version");
   std::set<std::uint32_t> new_blocks;
   for (std::uint32_t logical = 0; logical < 3; ++logical) {
     const std::uint32_t physical = overwrite_inode.direct_blocks[logical];
@@ -222,6 +257,8 @@ void TestOverwriteAndIndirectCow() {
   reader = OpenReader(path);
   Require(ReadAll(*reader) == expected,
           "applied partial/full/tail COW overwrite is incorrect");
+  Require(ReadFileInode(*reader).generation == 3,
+          "applied partial write lost its generation update");
 
   const std::string thirteen_blocks(
       13U * eufs::ondisk::kBlockSize, 'I');
@@ -230,7 +267,9 @@ void TestOverwriteAndIndirectCow() {
               *reader, 2, 0, thirteen_blocks, 40, &crossing, &detail) == 0,
           detail.c_str());
   const auto crossing_inode = PlannedInode(*reader, crossing);
-  Require(crossing_inode.indirect_block != 0 &&
+  Require(crossing.old_generation == 3 && crossing.new_generation == 4 &&
+              crossing_inode.generation == 4 &&
+              crossing_inode.indirect_block != 0 &&
               crossing.metadata_after_images.count(
                   crossing_inode.indirect_block) == 1 &&
               crossing.ordered_data_after_images.count(
@@ -249,12 +288,17 @@ void TestOverwriteAndIndirectCow() {
           "applied direct/indirect crossing write is incorrect");
 
   const auto indirect_inode = ReadFileInode(*reader);
+  Require(indirect_inode.generation == 4,
+          "direct-to-indirect write lost its generation update");
   eufs::metadata::FileWritePlan direct_only;
   Require(eufs::metadata::PrepareFileWrite(
               *reader, 2, 0, "D", 50, &direct_only, &detail) == 0,
           detail.c_str());
   const auto direct_only_inode = PlannedInode(*reader, direct_only);
-  Require(direct_only_inode.indirect_block == indirect_inode.indirect_block &&
+  Require(direct_only.old_generation == 4 &&
+              direct_only.new_generation == 5 &&
+              direct_only_inode.generation == 5 &&
+              direct_only_inode.indirect_block == indirect_inode.indirect_block &&
               direct_only.metadata_after_images.count(
                   indirect_inode.indirect_block) == 0,
           "direct-only overwrite unnecessarily replaced indirect metadata");
@@ -265,7 +309,10 @@ void TestOverwriteAndIndirectCow() {
               &indirect_update, &detail) == 0,
           detail.c_str());
   const auto indirect_update_inode = PlannedInode(*reader, indirect_update);
-  Require(indirect_update_inode.indirect_block !=
+  Require(indirect_update.old_generation == 4 &&
+              indirect_update.new_generation == 5 &&
+              indirect_update_inode.generation == 5 &&
+              indirect_update_inode.indirect_block !=
                   indirect_inode.indirect_block &&
               indirect_update.metadata_after_images.count(
                   indirect_update_inode.indirect_block) == 1 &&
@@ -285,7 +332,8 @@ void TestGapZeroFill() {
   eufs::metadata::FileWritePlan gap;
   Require(eufs::metadata::PrepareFileWrite(
               *reader, 2, 9000, "0123456789", 20, &gap, &detail) == 0 &&
-              gap.ordered_data_after_images.size() == 3,
+              gap.ordered_data_after_images.size() == 3 &&
+              gap.old_generation == 1 && gap.new_generation == 2,
           detail.c_str());
   reader.reset();
   Require(eufs::storage::ApplyFileWritePlan(path, gap, &detail) == 0,
@@ -319,12 +367,31 @@ void TestEnospcLeavesNoPlan() {
   unlink(path.c_str());
 }
 
+void TestGenerationOverflowLeavesNoPlan() {
+  const std::string path = TemporaryPath();
+  CreateEmptyFile(path, 8ULL * 1024ULL * 1024ULL,
+                  std::numeric_limits<std::uint64_t>::max());
+  auto reader = OpenReader(path);
+  eufs::metadata::FileWritePlan output;
+  output.inode_number = 77;
+  std::string detail;
+  Require(eufs::metadata::PrepareFileWrite(
+              *reader, 2, 0, "x", 20, &output, &detail) == -EOVERFLOW &&
+              output.inode_number == 77 &&
+              ReadFileInode(*reader).generation ==
+                  std::numeric_limits<std::uint64_t>::max(),
+          "range write accepted generation wrap or returned a partial plan");
+  reader.reset();
+  unlink(path.c_str());
+}
+
 }  // namespace
 
 int main() {
   TestOverwriteAndIndirectCow();
   TestGapZeroFill();
   TestEnospcLeavesNoPlan();
+  TestGenerationOverflowLeavesNoPlan();
   std::cout << "PASS: general COW file-write planner tests\n";
   return 0;
 }

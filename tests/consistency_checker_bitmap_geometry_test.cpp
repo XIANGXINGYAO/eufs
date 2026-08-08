@@ -1,3 +1,5 @@
+// 构造 bitmap 几何和镜像边界损坏，验证 eufsck 报告结构性错误而不越界读取。
+// 该测试关注“还能安全扫描多少”，而不是目录可达性。
 #include "checker/consistency_checker.h"
 #include "checker/consistency_report.h"
 #include "checker/eufsck_command.h"

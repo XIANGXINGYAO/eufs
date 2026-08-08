@@ -1,5 +1,7 @@
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
+// 本文件是测试 fixture 写入器：绕过在线 WAL，把计划结果直接写进临时镜像。
+// 这样可以精确构造恢复前状态；生产 eufsd 绝不能调用这里的直接覆盖逻辑。
 #include "metadata/ondisk_format.h"
 
 #include <cerrno>
@@ -15,6 +17,8 @@
 namespace eufs::storage {
 namespace {
 
+// 把生产 planner 的两类 after image 合并为“按指定顺序直接覆盖”的测试计划。
+// total_blocks 和 UUID 用来确认应用计划时面对的仍是生成计划时那一份镜像。
 struct DirectMutationPlan {
   std::uint32_t total_blocks{0};
   std::array<std::uint8_t, 16> filesystem_uuid{};
@@ -23,6 +27,7 @@ struct DirectMutationPlan {
   std::vector<std::uint32_t> write_order;
 };
 
+// 测试辅助器同样使用 RAII，确保所有提前返回路径都会关闭接管的 fd。
 class FileDescriptor {
  public:
   explicit FileDescriptor(int value) : value_(value) {}
@@ -46,12 +51,14 @@ class FileDescriptor {
   int value_;
 };
 
+// detail 是可选输出；为空时调用者只关心负 errno。
 void SetDetail(std::string* detail, std::string_view message) {
   if (detail != nullptr) {
     detail->assign(message);
   }
 }
 
+// 给系统调用错误补上操作名称和 strerror，便于定位 fixture 构造失败的位置。
 void SetSystemDetail(std::string* detail, std::string_view operation,
                      int error_number) {
   if (detail != nullptr) {
@@ -61,13 +68,16 @@ void SetSystemDetail(std::string* detail, std::string_view operation,
   }
 }
 
+// pread 可能短读或被信号打断，因此循环到指定区间全部读完。
 int PreadAll(int fd, std::uint8_t* output, std::size_t size,
              std::uint64_t offset, std::string* detail) {
   std::size_t completed = 0;
+  // completed 始终表示已经可靠放入 output 的字节数。
   while (completed < size) {
     const auto result = pread(fd, output + completed, size - completed,
                               static_cast<off_t>(offset + completed));
     if (result < 0 && errno == EINTR) {
+      // EINTR 没有消费数据，从同一偏移重试。
       continue;
     }
     if (result <= 0) {
@@ -80,6 +90,7 @@ int PreadAll(int fd, std::uint8_t* output, std::size_t size,
   return 0;
 }
 
+// 与 PreadAll 对称：保证指定区间全部写入内核后才返回成功。
 int PwriteAll(int fd, const std::uint8_t* input, std::size_t size,
               std::uint64_t offset, std::string* detail) {
   std::size_t completed = 0;
@@ -99,6 +110,7 @@ int PwriteAll(int fd, const std::uint8_t* input, std::size_t size,
   return 0;
 }
 
+// 在接触镜像前检查计划自身闭合：每个 after image 必须恰好出现在写序列一次。
 template <typename Plan>
 int ValidatePlan(const Plan& plan, std::string* detail) {
   if (plan.after_images.empty() ||
@@ -107,12 +119,14 @@ int ValidatePlan(const Plan& plan, std::string* detail) {
     return -EINVAL;
   }
 
+  // set 去重后的数量不同，说明同一物理块会被按同一计划重复覆盖。
   const std::set<std::uint32_t> ordered_blocks(plan.write_order.begin(),
                                                 plan.write_order.end());
   if (ordered_blocks.size() != plan.write_order.size()) {
     SetDetail(detail, "mutation plan write order contains duplicate blocks");
     return -EINVAL;
   }
+  // 写序列中的每个块都必须有对应 after image，而且不能越过镜像末尾。
   for (const std::uint32_t block : plan.write_order) {
     if (plan.after_images.find(block) == plan.after_images.end() ||
         block >= plan.total_blocks) {
@@ -124,6 +138,7 @@ int ValidatePlan(const Plan& plan, std::string* detail) {
   return 0;
 }
 
+// 接管已经持有锁的读写 fd，在 before-image 验证通过后直接应用测试计划。
 template <typename Plan>
 int ApplyPlanOnLockedFd(int locked_fd, const Plan& plan,
                         std::string* detail) {
@@ -140,6 +155,7 @@ int ApplyPlanOnLockedFd(int locked_fd, const Plan& plan,
     return result;
   }
 
+  // 不能只相信函数名中的 LockedFd；至少验证它确实以 O_RDWR 打开。
   const int status_flags = fcntl(fd.get(), F_GETFL);
   if (status_flags < 0) {
     const int error_number = errno;
@@ -151,6 +167,7 @@ int ApplyPlanOnLockedFd(int locked_fd, const Plan& plan,
     return -EACCES;
   }
 
+  // planner 记录了 total_blocks；镜像长度变化说明计划已经过期。
   struct stat image_stat {};
   if (fstat(fd.get(), &image_stat) != 0) {
     const int error_number = errno;
@@ -164,6 +181,7 @@ int ApplyPlanOnLockedFd(int locked_fd, const Plan& plan,
     return -ESTALE;
   }
 
+  // 长度相同仍可能被替换，因此继续核对 superblock 中的 UUID 和块数。
   ondisk::Block superblock_bytes{};
   result = PreadAll(fd.get(), superblock_bytes.data(), superblock_bytes.size(),
                     0, detail);
@@ -178,6 +196,7 @@ int ApplyPlanOnLockedFd(int locked_fd, const Plan& plan,
     return -ESTALE;
   }
 
+  // before image 是乐观并发校验：任一 home block 变化都拒绝套用旧计划。
   for (const auto& [block_number, expected] : plan.before_images) {
     if (block_number >= plan.total_blocks) {
       SetDetail(detail,
@@ -197,6 +216,7 @@ int ApplyPlanOnLockedFd(int locked_fd, const Plan& plan,
     }
   }
 
+  // 校验全部完成后才开始覆盖；顺序由 fixture 场景明确指定。
   for (const std::uint32_t block_number : plan.write_order) {
     const auto after = plan.after_images.find(block_number);
     result = PwriteAll(
@@ -206,6 +226,7 @@ int ApplyPlanOnLockedFd(int locked_fd, const Plan& plan,
       return result;
     }
   }
+  // 所有块写完后统一 fdatasync，保证后续恢复测试读取的是确定状态。
   if (fdatasync(fd.get()) != 0) {
     const int error_number = errno;
     SetSystemDetail(detail, "fdatasync image", error_number);
@@ -214,6 +235,7 @@ int ApplyPlanOnLockedFd(int locked_fd, const Plan& plan,
   return 0;
 }
 
+// 路径版入口只负责打开并取得非阻塞独占锁，真正应用逻辑复用上面的 fd 版本。
 template <typename Plan>
 int ApplyPlan(const std::string& image_path, const Plan& plan,
               std::string* detail) {
@@ -235,6 +257,7 @@ int ApplyPlan(const std::string& image_path, const Plan& plan,
     return -errno;
   }
   FileDescriptor fd(raw_fd);
+  // 另一个挂载会话持锁时返回 -EBUSY，测试辅助器不能绕过单写者约束。
   if (flock(fd.get(), LOCK_EX | LOCK_NB) != 0) {
     const int error_number = errno;
     SetSystemDetail(detail, "lock image", error_number);
@@ -243,6 +266,7 @@ int ApplyPlan(const std::string& image_path, const Plan& plan,
   return ApplyPlanOnLockedFd(fd.Release(), plan, detail);
 }
 
+// 把 ordered data 放在 metadata 前面，模拟生产 WAL 在 COMMIT 前的数据先行顺序。
 template <typename Plan>
 int BuildJournalLikeDirectMutationPlan(const Plan& plan,
                                        DirectMutationPlan* output,
@@ -256,10 +280,12 @@ int BuildJournalLikeDirectMutationPlan(const Plan& plan,
   output->filesystem_uuid = plan.filesystem_uuid;
   output->before_images = plan.before_images;
 
+  // COW 数据先加入 after_images 和 write_order。
   for (const auto& [block, after_image] : plan.ordered_data_after_images) {
     output->after_images.emplace(block, after_image);
     output->write_order.push_back(block);
   }
+  // 元数据随后加入；同一块被同时归类为数据和元数据属于 planner 错误。
   for (const auto& [block, after_image] : plan.metadata_after_images) {
     if (!output->after_images.emplace(block, after_image).second) {
       SetDetail(detail,
@@ -271,20 +297,23 @@ int BuildJournalLikeDirectMutationPlan(const Plan& plan,
   return 0;
 }
 
-}  // namespace
+}  // 匿名命名空间。
 
+// 空文件创建计划本来就带有统一 after_images/write_order，可直接应用。
 int ApplyCreatePlan(const std::string& image_path,
                     const metadata::EmptyFileCreatePlan& plan,
                     std::string* detail) {
   return ApplyPlan(image_path, plan, detail);
 }
 
+// 已锁 fd 版本用于 MountedImageSession 接管测试。
 int ApplyCreatePlanOnLockedFd(int locked_fd,
                               const metadata::EmptyFileCreatePlan& plan,
                               std::string* detail) {
   return ApplyPlanOnLockedFd(locked_fd, plan, detail);
 }
 
+// 旧单块写计划先转换成统一直接写计划，再复用相同校验和落盘过程。
 int ApplyFirstBlockWritePlan(const std::string& image_path,
                              const metadata::FirstBlockWritePlan& plan,
                              std::string* detail) {
@@ -297,6 +326,7 @@ int ApplyFirstBlockWritePlan(const std::string& image_path,
   return ApplyPlan(image_path, direct, detail);
 }
 
+// 该重载接管调用者传入的 fd；FileDescriptor 保证转换失败时也会关闭它。
 int ApplyFirstBlockWritePlanOnLockedFd(
     int locked_fd, const metadata::FirstBlockWritePlan& plan,
     std::string* detail) {
@@ -310,6 +340,7 @@ int ApplyFirstBlockWritePlanOnLockedFd(
   return ApplyPlanOnLockedFd(fd.Release(), direct, detail);
 }
 
+// 当前通用 FileWritePlan 的路径版 fixture 应用入口。
 int ApplyFileWritePlan(const std::string& image_path,
                        const metadata::FileWritePlan& plan,
                        std::string* detail) {
@@ -322,6 +353,7 @@ int ApplyFileWritePlan(const std::string& image_path,
   return ApplyPlan(image_path, direct, detail);
 }
 
+// 当前通用 FileWritePlan 的已锁 fd fixture 应用入口。
 int ApplyFileWritePlanOnLockedFd(int locked_fd,
                                  const metadata::FileWritePlan& plan,
                                  std::string* detail) {

@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package eufs.rpc.protocol;
+
+option cc_generic_services = true;
+
+message ObjectVersion {
+  uint32 inode_number = 1;
+  uint64 generation = 2;
+}
+
+message CreateIfAbsent {}
+
+message PutObjectRequest {
+  string key = 1;
+  uint64 payload_size = 2;
+  bytes sha256 = 3;
+  uint64 timestamp_ns = 4;
+
+  oneof precondition {
+    CreateIfAbsent create_if_absent = 5;
+    ObjectVersion expected_version = 6;
+  }
+}
+
+enum PutStatus {
+  PUT_STATUS_OK = 0;
+  PUT_STATUS_INVALID_ARGUMENT = 1;
+  PUT_STATUS_OVERLOADED = 2;
+  PUT_STATUS_SERVER_STOPPING = 3;
+  PUT_STATUS_ALREADY_EXISTS = 4;
+  PUT_STATUS_VERSION_MISMATCH = 5;
+  PUT_STATUS_STORAGE_ERROR = 6;
+  PUT_STATUS_RESULT_UNKNOWN = 7;
+}
+
+message PutObjectResponse {
+  PutStatus status = 1;
+  ObjectVersion committed_version = 2;
+  ObjectVersion current_version = 3;
+  string detail = 4;
+}
+
+message ObjectMetadata {
+  ObjectVersion version = 1;
+  uint64 size = 2;
+  uint64 mtime_ns = 3;
+}
+
+enum ReadStatus {
+  READ_STATUS_OK = 0;
+  READ_STATUS_INVALID_ARGUMENT = 1;
+  READ_STATUS_OVERLOADED = 2;
+  READ_STATUS_SERVER_STOPPING = 3;
+  READ_STATUS_NOT_FOUND = 4;
+  READ_STATUS_STORAGE_ERROR = 5;
+}
+
+message GetObjectRequest {
+  string key = 1;
+}
+
+// 对象正文放在 brpc response attachment，避免再经过 protobuf bytes 字段。
+message GetObjectResponse {
+  ReadStatus status = 1;
+  ObjectMetadata metadata = 2;
+  string detail = 3;
+}
+
+message StatObjectRequest {
+  string key = 1;
+}
+
+message StatObjectResponse {
+  ReadStatus status = 1;
+  ObjectMetadata metadata = 2;
+  string detail = 3;
+}
+
+service ObjectService {
+  rpc PutObject(PutObjectRequest) returns (PutObjectResponse);
+  rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
+  rpc StatObject(StatObjectRequest) returns (StatObjectResponse);
+}

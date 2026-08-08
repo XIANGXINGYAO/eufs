@@ -1,3 +1,5 @@
+// 验证创建空文件计划同时更新父目录块、父 inode、新 inode 和 inode bitmap。
+// planner 只生成 before/after 块镜像；本测试不把计划直接视为已持久化结果。
 #include "metadata/empty_file_create_plan.h"
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"

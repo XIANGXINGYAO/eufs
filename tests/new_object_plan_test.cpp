@@ -1,3 +1,5 @@
+// 验证 mkdir/create 的统一新对象计划对目录项、inode、bitmap 和父目录元数据的修改。
+// 同时检查重名、父目录非法、空间不足和目录扩容等失败路径不产生半份计划。
 #include "checker/consistency_checker.h"
 #include "journal/journal_control_store.h"
 #include "metadata/new_object_plan.h"

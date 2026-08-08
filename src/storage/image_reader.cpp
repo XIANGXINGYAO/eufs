@@ -15,6 +15,7 @@
 namespace eufs::storage {
 namespace {
 
+// 本文件是磁盘读取唯一高层入口：先验证镜像全局几何，再按需解析 inode/目录/文件。
 class FileDescriptor {
  public:
   explicit FileDescriptor(int value) : value_(value) {}
@@ -53,6 +54,7 @@ void SetSystemDetail(std::string* detail, std::string_view operation,
   }
 }
 
+// 从 little-endian single-indirect 块读取一个物理块号。
 std::uint32_t GetLe32(const std::uint8_t* input) {
   std::uint32_t value = 0;
   for (std::size_t index = 0; index < 4; ++index) {
@@ -61,11 +63,13 @@ std::uint32_t GetLe32(const std::uint8_t* input) {
   return value;
 }
 
+// 查询缓存 bitmap 的一个位。
 bool BitmapBit(const std::vector<std::uint8_t>& bitmap, std::uint32_t bit) {
   return (bitmap[bit / 8U] & static_cast<std::uint8_t>(1U << (bit % 8U))) !=
          0;
 }
 
+// 交叉验证目录项冗余 file_type 与目标 inode.mode。
 bool IsDirectoryType(ondisk::DirectoryFileType type, std::uint32_t mode) {
   if (type == ondisk::DirectoryFileType::kRegular) {
     return S_ISREG(mode);
@@ -76,6 +80,7 @@ bool IsDirectoryType(ondisk::DirectoryFileType type, std::uint32_t mode) {
   return false;
 }
 
+// 循环 pread 处理短读/EINTR，完整读取指定字节区间。
 int ReadExactAt(int fd, std::uint64_t offset, std::uint8_t* output,
                 std::size_t size, std::string_view operation,
                 std::string* detail) {
@@ -97,8 +102,9 @@ int ReadExactAt(int fd, std::uint64_t offset, std::uint8_t* output,
   return 0;
 }
 
-}  // namespace
+}  // 匿名命名空间。
 
+// 私有构造函数接管已经完成全局校验的 fd 和缓存结构。
 ImageReader::ImageReader(int fd, std::uint64_t image_size,
                          const ondisk::Superblock& superblock,
                          const journal::JournalControl& journal_control,
@@ -113,12 +119,14 @@ ImageReader::ImageReader(int fd, std::uint64_t image_size,
       inode_bitmap_(std::move(inode_bitmap)),
       block_bitmap_(std::move(block_bitmap)) {}
 
+// 析构关闭 reader 自己接管的复制 fd，不影响 session 主 fd。
 ImageReader::~ImageReader() {
   if (fd_ >= 0) {
     close(fd_);
   }
 }
 
+// 独立只读打开路径，然后复用 AdoptLockedFd 的全部校验逻辑。
 int ImageReader::Open(const std::string& path,
                       std::unique_ptr<ImageReader>* output,
                       std::string* detail) {
@@ -145,6 +153,7 @@ int ImageReader::Open(const std::string& path,
   return AdoptLockedFd(fd, output, detail);
 }
 
+// 接管 fd，读取并验证 superblock、A/B control、bitmap 和 metadata 分配前缀。
 int ImageReader::AdoptLockedFd(int locked_fd,
                                std::unique_ptr<ImageReader>* output,
                                std::string* detail) {
@@ -203,7 +212,8 @@ int ImageReader::AdoptLockedFd(int locked_fd,
   if (!ondisk::DecodeSuperblock(superblock_bytes, &superblock, detail)) {
     return -EUCLEAN;
   }
-  if (superblock.feature_incompat != 0) {
+  if ((superblock.feature_incompat &
+       ~ondisk::kSupportedFeatureIncompat) != 0) {
     SetDetail(detail, "image requires unsupported incompatible features");
     return -EOPNOTSUPP;
   }
@@ -321,6 +331,7 @@ int ImageReader::AdoptLockedFd(int locked_fd,
   return 0;
 }
 
+// 以下两个函数只查询打开时缓存的 bitmap 快照。
 bool ImageReader::IsInodeAllocated(std::uint32_t inode_number) const {
   return inode_number >= 1 && inode_number <= superblock_.total_inodes &&
          BitmapBit(inode_bitmap_, inode_number - 1U);
@@ -331,6 +342,7 @@ bool ImageReader::IsBlockAllocated(std::uint32_t block_number) const {
          BitmapBit(block_bitmap_, block_number);
 }
 
+// 读取任意镜像物理块，先做范围和输出地址检查。
 int ImageReader::ReadBlock(std::uint32_t block_number, ondisk::Block* output,
                            std::string* detail) const {
   if (output == nullptr || block_number >= superblock_.total_blocks) {
@@ -366,6 +378,7 @@ int ImageReader::ReadExact(std::uint64_t offset, std::uint8_t* output,
   return 0;
 }
 
+// 验证数据块位于 data 区并在 bitmap 中标记占用。
 int ImageReader::ValidateAllocatedDataBlock(std::uint32_t block_number,
                                             std::string* detail) const {
   if (block_number < superblock_.data.start_block ||
@@ -377,6 +390,7 @@ int ImageReader::ValidateAllocatedDataBlock(std::uint32_t block_number,
   return 0;
 }
 
+// logical < 12 使用 inode.direct；其余从 inode.indirect_block 读取 uint32 指针。
 int ImageReader::MapLogicalBlock(const ondisk::InodeRecord& inode,
                                  std::uint32_t logical_block,
                                  std::uint32_t* physical_block,
@@ -415,6 +429,7 @@ int ImageReader::MapLogicalBlock(const ondisk::InodeRecord& inode,
   return ValidateAllocatedDataBlock(*physical_block, detail);
 }
 
+// 定位 inode table 槽位，读取 128 字节并调用统一 DecodeInode。
 int ImageReader::ReadInode(std::uint32_t inode_number,
                            ondisk::InodeRecord* output,
                            std::string* detail) const {
@@ -514,6 +529,7 @@ int ImageReader::ReadInode(std::uint32_t inode_number,
   return 0;
 }
 
+// 按目录 inode 的逻辑块顺序解码可变长记录；一个坏 record 会使该目录读取失败。
 int ImageReader::ListDirectory(
     std::uint32_t inode_number,
     std::vector<ondisk::DirectoryEntry>* output,
@@ -587,6 +603,7 @@ int ImageReader::ListDirectory(
   return 0;
 }
 
+// 从根 inode 开始逐分量解析绝对路径，不接受空分量、`.` 或 `..`。
 int ImageReader::ResolvePath(std::string_view path,
                              std::uint32_t* inode_number,
                              ondisk::InodeRecord* inode,
@@ -644,6 +661,7 @@ int ImageReader::ResolvePath(std::string_view path,
   return result;
 }
 
+// 按 offset 和 requested 跨逻辑块读取，EOF 外请求返回 0 字节。
 int ImageReader::ReadFile(std::uint32_t inode_number, std::uint64_t offset,
                           std::uint8_t* output, std::size_t requested,
                           std::size_t* bytes_read,
@@ -692,3 +710,8 @@ int ImageReader::ReadFile(std::uint32_t inode_number, std::uint64_t offset,
 }
 
 }  // namespace eufs::storage
+  // candidate 局部收集全部状态，任一步失败都不会发布半初始化 reader。
+  // superblock 决定后续所有区域偏移，必须最先读取并验证。
+  // A/B control 必须与 superblock UUID/ring 几何匹配。
+  // inode/block bitmap 完整载入内存，并验证 metadata 前缀与容量尾部均保留。
+  // 根据 inode.size 验证必需指针存在、末尾多余指针为 0、所有块已分配且不重复。

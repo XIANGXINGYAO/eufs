@@ -1,8 +1,10 @@
+// 验证根目录的 '.'、'..'、目录项编码和目标 inode 类型等根命名空间约束。
+// 根目录不合法时仍要求检查器给出结构化证据，而不是崩溃或编造后续目录项。
 #include "checker/consistency_checker.h"
 #include "metadata/empty_file_create_plan.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>

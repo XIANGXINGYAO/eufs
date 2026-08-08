@@ -1,3 +1,5 @@
+// 从 mkfs 生成的最小合法镜像启动检查，验证根 inode 能作为可达性分析的唯一种子。
+// 这是后续所有损坏场景的干净基线。
 #include "checker/consistency_checker.h"
 #include "storage/mkfs.h"
 

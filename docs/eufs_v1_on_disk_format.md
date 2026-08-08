@@ -1,6 +1,6 @@
 # eufs v1 磁盘格式规范
 
-状态：Stage C 已评审基线；实现与测试必须以本文字段偏移为准。  
+状态：v1 已评审基线；实现与测试必须以本文字段偏移为准。
 范围：superblock、inode、目录项和布局公式。journal 的记录格式在 Stage D 单独评审。
 
 ## 1. 依据与边界
@@ -186,7 +186,7 @@ align_up(8 + name_length, 4)
 - `eufs-mkfs` 能预分配镜像，初始化两个 bitmap、root inode 和两份 clean journal control，并在 body `fdatasync` 成功后最后写入 superblock；64 MiB 样例镜像已按原始偏移检查。
 - `ImageReader` 会校验镜像长度、journal control UUID/几何、metadata/tail bitmap、inode CRC/槽位、目录记录、direct 和 single-indirect 引用；mkfs、reader 与 control store 使用 advisory `flock` 防止遵守协议的 writer 并发改写镜像。
 - 只读 `eufsd` 已把同一空镜像挂载两次，root inode/权限/link count 均来自磁盘，挂载前后 SHA-256 相同。
-- Stage C 已通过 FUSE 持久化创建 `/a.txt` 并写入 `hello`，卸载后只读重挂载仍能读取，普通和 sanitizer 链路均通过。
+- 当前磁盘版 `eufsd` 已通过 FUSE 持久化创建 `/a.txt` 并写入 `hello`，卸载后重挂载仍能读取，普通和 sanitizer 链路均通过。
 - Stage D 已完成 A/B control store、事务 body/control staging、COMMIT writer、只读 recovery classifier 和同步 executor；executor 已用完整 after-image 执行 home replay、home sync 与 clean checkpoint，但尚未接入自动挂载和 FUSE 写路径。
 
 尚不能声称：

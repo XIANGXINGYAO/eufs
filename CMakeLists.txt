@@ -8,6 +8,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FUSE3 REQUIRED fuse3)
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+
+option(EUFS_BUILD_BRPC_SERVICE "Build the Apache brpc object service" OFF)
+set(BRPC_ROOT "" CACHE PATH "Apache brpc output root containing include/ and lib/")
 
 add_library(eufs_mounted_image_session
   src/storage/mounted_image_session.cpp
@@ -41,7 +45,9 @@ add_library(eufs_consistency_checker
   src/checker/consistency_checker.cpp
 )
 target_include_directories(eufs_consistency_checker PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(eufs_consistency_checker PUBLIC eufs_ondisk)
+target_link_libraries(eufs_consistency_checker PUBLIC
+  eufs_ondisk eufs_request_ledger_format
+)
 target_compile_options(eufs_consistency_checker PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_definitions(eufs_consistency_checker PRIVATE _FILE_OFFSET_BITS=64)
 
@@ -57,13 +63,6 @@ add_library(eufs_create_plan
 target_include_directories(eufs_create_plan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(eufs_create_plan PUBLIC eufs_image_reader eufs_bitmap_allocator eufs_ondisk)
 target_compile_options(eufs_create_plan PRIVATE -Wall -Wextra -Wpedantic)
-
-add_library(eufs_first_block_write_plan
-  src/metadata/first_block_write_plan.cpp
-)
-target_include_directories(eufs_first_block_write_plan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(eufs_first_block_write_plan PUBLIC eufs_image_reader eufs_bitmap_allocator eufs_ondisk)
-target_compile_options(eufs_first_block_write_plan PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(eufs_file_mutation_plan
   src/metadata/file_mutation_plan.cpp
@@ -92,6 +91,45 @@ add_library(eufs_object_replace_plan
 target_include_directories(eufs_object_replace_plan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(eufs_object_replace_plan PUBLIC eufs_file_mutation_plan)
 target_compile_options(eufs_object_replace_plan PRIVATE -Wall -Wextra -Wpedantic)
+
+add_library(eufs_request_fingerprint
+  src/object/request_fingerprint.cpp
+)
+target_include_directories(eufs_request_fingerprint PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(eufs_request_fingerprint PUBLIC
+  eufs_ondisk OpenSSL::Crypto
+)
+target_compile_options(eufs_request_fingerprint PRIVATE
+  -Wall -Wextra -Wpedantic
+)
+
+add_library(eufs_request_ledger_format
+  src/object/request_ledger_format.cpp
+)
+target_include_directories(eufs_request_ledger_format PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(eufs_request_ledger_format PUBLIC
+  eufs_ondisk
+)
+target_compile_options(eufs_request_ledger_format PRIVATE
+  -Wall -Wextra -Wpedantic
+)
+
+add_library(eufs_request_ledger_index
+  src/object/request_ledger_index.cpp
+)
+target_include_directories(eufs_request_ledger_index PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(eufs_request_ledger_index PUBLIC
+  eufs_request_ledger_format eufs_image_reader
+)
+target_compile_options(eufs_request_ledger_index PRIVATE
+  -Wall -Wextra -Wpedantic
+)
 
 add_library(eufs_journal_format
   src/journal/ondisk_journal.cpp
@@ -138,9 +176,108 @@ add_library(eufs_object_backend
 target_include_directories(eufs_object_backend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(eufs_object_backend PUBLIC
   eufs_new_object_plan eufs_object_replace_plan eufs_journal_transaction_executor
-  eufs_mounted_image_session eufs_image_reader Threads::Threads
+  eufs_mounted_image_session eufs_image_reader eufs_request_ledger_index
+  Threads::Threads
 )
 target_compile_options(eufs_object_backend PRIVATE -Wall -Wextra -Wpedantic)
+
+add_library(eufs_rpc_admission
+  src/rpc/inflight_byte_limiter.cpp
+  src/rpc/bounded_task_queue.cpp
+)
+target_include_directories(eufs_rpc_admission PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(eufs_rpc_admission PUBLIC Threads::Threads)
+target_compile_options(eufs_rpc_admission PRIVATE
+  -Wall -Wextra -Wpedantic
+)
+
+if(EUFS_BUILD_BRPC_SERVICE)
+  if(NOT BRPC_ROOT)
+    message(FATAL_ERROR "BRPC_ROOT is required when EUFS_BUILD_BRPC_SERVICE=ON")
+  endif()
+  find_package(Protobuf REQUIRED)
+  find_package(OpenSSL REQUIRED)
+  find_path(BRPC_INCLUDE_DIR brpc/server.h
+    PATHS ${BRPC_ROOT}/include NO_DEFAULT_PATH REQUIRED
+  )
+  find_library(BRPC_LIBRARY brpc
+    PATHS ${BRPC_ROOT}/lib NO_DEFAULT_PATH REQUIRED
+  )
+  pkg_check_modules(BRPC_PROTOBUF REQUIRED IMPORTED_TARGET protobuf)
+  pkg_check_modules(BRPC_GFLAGS REQUIRED IMPORTED_TARGET gflags)
+  pkg_check_modules(BRPC_LEVELDB REQUIRED IMPORTED_TARGET leveldb)
+
+  protobuf_generate_cpp(EUFS_RPC_PROTO_SRCS EUFS_RPC_PROTO_HDRS
+    src/rpc/object_service.proto
+  )
+  add_library(eufs_rpc_protocol
+    ${EUFS_RPC_PROTO_SRCS}
+    ${EUFS_RPC_PROTO_HDRS}
+  )
+  target_include_directories(eufs_rpc_protocol PUBLIC
+    ${CMAKE_CURRENT_BINARY_DIR}
+  )
+  target_link_libraries(eufs_rpc_protocol PUBLIC PkgConfig::BRPC_PROTOBUF)
+
+  add_library(eufs_object_service
+    src/rpc/object_service_impl.cpp
+  )
+  target_include_directories(eufs_object_service PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_BINARY_DIR}
+  )
+  target_include_directories(eufs_object_service SYSTEM PUBLIC
+    ${BRPC_INCLUDE_DIR}
+  )
+  target_compile_definitions(eufs_object_service PRIVATE
+    __const__=__unused__
+  )
+  target_compile_options(eufs_object_service PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_link_libraries(eufs_object_service PUBLIC
+    eufs_rpc_protocol eufs_rpc_admission eufs_object_backend
+    ${BRPC_LIBRARY}
+    PkgConfig::BRPC_GFLAGS PkgConfig::BRPC_LEVELDB
+    PkgConfig::BRPC_PROTOBUF OpenSSL::SSL OpenSSL::Crypto
+    ${CMAKE_DL_LIBS} rt
+  )
+
+  add_executable(eufs_object_server
+    src/app/eufs_object_server_main.cpp
+  )
+  target_include_directories(eufs_object_server SYSTEM PRIVATE
+    ${BRPC_INCLUDE_DIR}
+  )
+  target_compile_definitions(eufs_object_server PRIVATE
+    __const__=__unused__
+  )
+  target_compile_options(eufs_object_server PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_link_libraries(eufs_object_server PRIVATE eufs_object_service)
+
+  add_executable(eufs_object_client
+    src/app/eufs_object_client_main.cpp
+  )
+  target_include_directories(eufs_object_client SYSTEM PRIVATE
+    ${BRPC_INCLUDE_DIR}
+  )
+  target_compile_definitions(eufs_object_client PRIVATE
+    __const__=__unused__
+  )
+  target_compile_options(eufs_object_client PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_link_libraries(eufs_object_client PRIVATE
+    eufs_rpc_protocol ${BRPC_LIBRARY}
+    PkgConfig::BRPC_GFLAGS PkgConfig::BRPC_LEVELDB
+    PkgConfig::BRPC_PROTOBUF OpenSSL::SSL OpenSSL::Crypto
+    ${CMAKE_DL_LIBS} rt Threads::Threads
+  )
+endif()
 
 target_link_libraries(eufs_mkfs_core PUBLIC eufs_journal_format)
 target_link_libraries(eufs_image_reader PUBLIC eufs_journal_format)
@@ -159,21 +296,13 @@ target_link_libraries(eufsck PRIVATE eufsck_core)
 target_compile_options(eufsck PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_definitions(eufsck PRIVATE _FILE_OFFSET_BITS=64)
 
-add_library(eufs_writable_image
-  src/storage/writable_image.cpp
+add_library(eufs_mount_state
+  src/fuse/mount_state.cpp
 )
-target_include_directories(eufs_writable_image PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(eufs_writable_image PUBLIC eufs_create_plan eufs_first_block_write_plan eufs_file_write_plan eufs_ondisk)
-target_compile_options(eufs_writable_image PRIVATE -Wall -Wextra -Wpedantic)
-target_compile_definitions(eufs_writable_image PRIVATE _FILE_OFFSET_BITS=64)
-
-add_library(eufs_stage_c_state
-  src/fuse/stage_c_state.cpp
-)
-target_include_directories(eufs_stage_c_state PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(eufs_stage_c_state PUBLIC eufs_mounted_image_session eufs_journal_control_store eufs_image_reader)
-target_compile_options(eufs_stage_c_state PRIVATE -Wall -Wextra -Wpedantic)
-target_compile_definitions(eufs_stage_c_state PRIVATE _FILE_OFFSET_BITS=64)
+target_include_directories(eufs_mount_state PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(eufs_mount_state PUBLIC eufs_mounted_image_session eufs_journal_control_store eufs_image_reader)
+target_compile_options(eufs_mount_state PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_definitions(eufs_mount_state PRIVATE _FILE_OFFSET_BITS=64)
 
 add_executable(eufs_mkfs src/app/mkfs_main.cpp)
 set_target_properties(eufs_mkfs PROPERTIES OUTPUT_NAME "eufs-mkfs")
@@ -183,27 +312,55 @@ target_compile_definitions(eufs_mkfs PRIVATE _FILE_OFFSET_BITS=64)
 
 add_executable(eufsd
   src/app/eufsd_main.cpp
-  src/fuse/read_only_operations.cpp
+  src/fuse/operations.cpp
 )
 target_include_directories(eufsd PRIVATE ${FUSE3_INCLUDE_DIRS})
 target_link_directories(eufsd PRIVATE ${FUSE3_LIBRARY_DIRS})
 target_link_libraries(eufsd PRIVATE
-  eufs_stage_c_state eufs_writable_image eufs_journal_transaction_executor
+  eufs_mount_state eufs_create_plan eufs_file_write_plan
+  eufs_journal_transaction_executor
   ${FUSE3_LIBRARIES}
 )
 target_compile_options(eufsd PRIVATE ${FUSE3_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
 target_compile_definitions(eufsd PRIVATE _FILE_OFFSET_BITS=64)
 
-add_executable(eufs src/main.cpp)
-target_include_directories(eufs PRIVATE ${FUSE3_INCLUDE_DIRS})
-target_link_directories(eufs PRIVATE ${FUSE3_LIBRARY_DIRS})
-target_link_libraries(eufs PRIVATE ${FUSE3_LIBRARIES})
-target_compile_options(eufs PRIVATE ${FUSE3_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
-target_compile_definitions(eufs PRIVATE _FILE_OFFSET_BITS=64)
-
 include(CTest)
 if(BUILD_TESTING)
   enable_testing()
+
+  # 下面两个库只用于构造测试镜像和早期恢复场景，不进入 eufsd 产品链路。
+  add_library(eufs_first_block_write_plan
+    tests/support/first_block_write_plan.cpp
+  )
+  target_include_directories(eufs_first_block_write_plan PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(eufs_first_block_write_plan PUBLIC
+    eufs_image_reader eufs_bitmap_allocator eufs_ondisk
+  )
+  target_compile_options(eufs_first_block_write_plan PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+
+  add_library(eufs_writable_image
+    tests/support/writable_image.cpp
+  )
+  target_include_directories(eufs_writable_image PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(eufs_writable_image PUBLIC
+    eufs_create_plan eufs_first_block_write_plan eufs_file_write_plan
+    eufs_ondisk
+  )
+  target_compile_options(eufs_writable_image PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(eufs_writable_image PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+
   add_executable(ondisk_format_test tests/ondisk_format_test.cpp)
   target_link_libraries(ondisk_format_test PRIVATE eufs_ondisk)
   target_compile_options(ondisk_format_test PRIVATE -Wall -Wextra -Wpedantic)
@@ -215,7 +372,9 @@ if(BUILD_TESTING)
   add_test(NAME ondisk_journal_test COMMAND ondisk_journal_test)
 
   add_executable(mkfs_image_test tests/mkfs_image_test.cpp)
-  target_link_libraries(mkfs_image_test PRIVATE eufs_mkfs_core)
+  target_link_libraries(mkfs_image_test PRIVATE
+    eufs_mkfs_core eufs_image_reader eufs_consistency_checker
+  )
   target_compile_options(mkfs_image_test PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_definitions(mkfs_image_test PRIVATE _FILE_OFFSET_BITS=64)
   add_test(NAME mkfs_image_test COMMAND mkfs_image_test)
@@ -521,6 +680,54 @@ if(BUILD_TESTING)
   )
   add_test(NAME object_backend_test COMMAND object_backend_test)
 
+  add_executable(rpc_admission_queue_test
+    tests/rpc_admission_queue_test.cpp
+  )
+  target_link_libraries(rpc_admission_queue_test PRIVATE
+    eufs_rpc_admission Threads::Threads
+  )
+  target_compile_options(rpc_admission_queue_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME rpc_admission_queue_test COMMAND rpc_admission_queue_test)
+
+  add_executable(request_fingerprint_test
+    tests/request_fingerprint_test.cpp
+  )
+  target_link_libraries(request_fingerprint_test PRIVATE
+    eufs_request_fingerprint
+  )
+  target_compile_options(request_fingerprint_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME request_fingerprint_test COMMAND request_fingerprint_test)
+
+  add_executable(request_ledger_format_test
+    tests/request_ledger_format_test.cpp
+  )
+  target_link_libraries(request_ledger_format_test PRIVATE
+    eufs_request_ledger_format
+  )
+  target_compile_options(request_ledger_format_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME request_ledger_format_test COMMAND request_ledger_format_test)
+
+  add_executable(request_ledger_index_test
+    tests/request_ledger_index_test.cpp
+  )
+  target_link_libraries(request_ledger_index_test PRIVATE
+    eufs_request_ledger_index eufs_object_backend eufs_consistency_checker
+    eufs_mkfs_core
+  )
+  target_compile_options(request_ledger_index_test PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_compile_definitions(request_ledger_index_test PRIVATE
+    _FILE_OFFSET_BITS=64
+  )
+  add_test(NAME request_ledger_index_test COMMAND request_ledger_index_test)
+
   add_executable(first_block_write_apply_test tests/first_block_write_apply_test.cpp)
   target_link_libraries(first_block_write_apply_test PRIVATE eufs_writable_image eufs_mkfs_core eufs_image_reader)
   target_compile_options(first_block_write_apply_test PRIVATE -Wall -Wextra -Wpedantic)
@@ -556,21 +763,21 @@ if(BUILD_TESTING)
   target_compile_definitions(mounted_image_mutation_adoption_test PRIVATE _FILE_OFFSET_BITS=64)
   add_test(NAME mounted_image_mutation_adoption_test COMMAND mounted_image_mutation_adoption_test)
 
-  add_executable(stage_c_state_startup_test tests/stage_c_state_startup_test.cpp)
-  target_link_libraries(stage_c_state_startup_test PRIVATE eufs_stage_c_state eufs_mkfs_core)
-  target_compile_options(stage_c_state_startup_test PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_definitions(stage_c_state_startup_test PRIVATE _FILE_OFFSET_BITS=64)
-  add_test(NAME stage_c_state_startup_test COMMAND stage_c_state_startup_test)
+  add_executable(mount_state_startup_test tests/mount_state_startup_test.cpp)
+  target_link_libraries(mount_state_startup_test PRIVATE eufs_mount_state eufs_mkfs_core)
+  target_compile_options(mount_state_startup_test PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_definitions(mount_state_startup_test PRIVATE _FILE_OFFSET_BITS=64)
+  add_test(NAME mount_state_startup_test COMMAND mount_state_startup_test)
 
   add_executable(fuse_write_error_contract_test
     tests/fuse_write_error_contract_test.cpp
-    src/fuse/read_only_operations.cpp
+    src/fuse/operations.cpp
   )
   target_include_directories(fuse_write_error_contract_test PRIVATE
     ${FUSE3_INCLUDE_DIRS}
   )
   target_link_libraries(fuse_write_error_contract_test PRIVATE
-    eufs_stage_c_state eufs_writable_image eufs_consistency_checker
+    eufs_mount_state eufs_writable_image eufs_consistency_checker
     eufs_mkfs_core eufs_journal_transaction_executor
   )
   target_compile_options(fuse_write_error_contract_test PRIVATE

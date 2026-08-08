@@ -1,4 +1,6 @@
-#include "fuse/stage_c_state.h"
+// 验证挂载状态按“独占会话 -> 启动恢复 -> 只读解析器”顺序建立。
+// 恢复失败或锁冲突必须发生在进入 FUSE 事件循环之前。
+#include "fuse/mount_state.h"
 #include "metadata/ondisk_format.h"
 #include "storage/mkfs.h"
 
@@ -161,7 +163,7 @@ RecoveryFixture CreateRecoveryFixture(bool committed) {
   return fixture;
 }
 
-std::uint64_t RootMtime(const eufs::fuse_adapter::StageCState& state) {
+std::uint64_t RootMtime(const eufs::fuse_adapter::FuseMountState& state) {
   eufs::ondisk::InodeRecord root;
   std::string detail;
   Require(state.reader->ReadInode(1, &root, &detail) == 0, detail.c_str());
@@ -173,7 +175,7 @@ void RequireSessionLock(const std::string& path) {
   std::string detail;
   Require(eufs::storage::MountedImageSession::Open(path, &contender, &detail) ==
               -EBUSY,
-          "successful Stage C state did not retain the Session lock");
+          "successful mount state did not retain the Session lock");
 }
 
 void RequireReleasedLock(const std::string& path) {
@@ -202,17 +204,17 @@ class SyncUnknownIo final : public eufs::journal::JournalControlIo {
 
 void TestEmptyStartupLoadsReaderAndRetainsLock() {
   auto fixture = CreateImage("/tmp/eufs-stage-c-empty-startup-XXXXXX");
-  std::unique_ptr<eufs::fuse_adapter::StageCState> state;
+  std::unique_ptr<eufs::fuse_adapter::FuseMountState> state;
   eufs::journal::RecoveryAction action =
       eufs::journal::RecoveryAction::kDiscarded;
   std::string detail;
-  Require(eufs::fuse_adapter::OpenStageCState(
+  Require(eufs::fuse_adapter::OpenFuseMountState(
               fixture.path, &state, &action, &detail) == 0,
           detail.c_str());
   Require(action == eufs::journal::RecoveryAction::kNoAction &&
               state != nullptr && state->reader != nullptr &&
               state->session != nullptr,
-          "empty startup did not produce a complete Stage C state");
+          "empty startup did not produce a complete mount state");
   RequireSessionLock(fixture.path);
   state.reset();
   RequireReleasedLock(fixture.path);
@@ -221,10 +223,10 @@ void TestEmptyStartupLoadsReaderAndRetainsLock() {
 
 void TestUncommittedStartupDiscardsBeforeReaderLoad() {
   auto fixture = CreateRecoveryFixture(false);
-  std::unique_ptr<eufs::fuse_adapter::StageCState> state;
+  std::unique_ptr<eufs::fuse_adapter::FuseMountState> state;
   eufs::journal::RecoveryAction action{};
   std::string detail;
-  Require(eufs::fuse_adapter::OpenStageCState(
+  Require(eufs::fuse_adapter::OpenFuseMountState(
               fixture.image.path, &state, &action, &detail) == 0,
           detail.c_str());
   Require(action == eufs::journal::RecoveryAction::kDiscarded &&
@@ -237,10 +239,10 @@ void TestUncommittedStartupDiscardsBeforeReaderLoad() {
 
 void TestCommittedStartupReplaysBeforeReaderLoad() {
   auto fixture = CreateRecoveryFixture(true);
-  std::unique_ptr<eufs::fuse_adapter::StageCState> state;
+  std::unique_ptr<eufs::fuse_adapter::FuseMountState> state;
   eufs::journal::RecoveryAction action{};
   std::string detail;
-  Require(eufs::fuse_adapter::OpenStageCState(
+  Require(eufs::fuse_adapter::OpenFuseMountState(
               fixture.image.path, &state, &action, &detail) == 0,
           detail.c_str());
   Require(action ==
@@ -259,12 +261,12 @@ void TestBusyImageNeverProducesState() {
   Require(eufs::storage::MountedImageSession::Open(fixture.path, &owner,
                                                    &detail) == 0,
           detail.c_str());
-  std::unique_ptr<eufs::fuse_adapter::StageCState> state;
+  std::unique_ptr<eufs::fuse_adapter::FuseMountState> state;
   eufs::journal::RecoveryAction action{};
-  Require(eufs::fuse_adapter::OpenStageCState(
+  Require(eufs::fuse_adapter::OpenFuseMountState(
               fixture.path, &state, &action, &detail) == -EBUSY &&
               state == nullptr,
-          "busy image produced a mountable Stage C state");
+          "busy image produced a mountable state");
   owner.reset();
   unlink(fixture.path.c_str());
 }
@@ -272,27 +274,27 @@ void TestBusyImageNeverProducesState() {
 void TestCorruptImageNeverProducesState() {
   const std::string path =
       TemporaryPath("/tmp/eufs-stage-c-corrupt-startup-XXXXXX");
-  std::unique_ptr<eufs::fuse_adapter::StageCState> state;
+  std::unique_ptr<eufs::fuse_adapter::FuseMountState> state;
   eufs::journal::RecoveryAction action{};
   std::string detail;
-  Require(eufs::fuse_adapter::OpenStageCState(path, &state, &action, &detail) ==
+  Require(eufs::fuse_adapter::OpenFuseMountState(path, &state, &action, &detail) ==
                   -EUCLEAN &&
               state == nullptr,
-          "corrupt image produced a mountable Stage C state");
+          "corrupt image produced a mountable state");
   RequireReleasedLock(path);
   unlink(path.c_str());
 }
 
 void TestRecoverySyncUncertaintyNeverProducesState() {
   auto fixture = CreateRecoveryFixture(false);
-  std::unique_ptr<eufs::fuse_adapter::StageCState> state;
+  std::unique_ptr<eufs::fuse_adapter::FuseMountState> state;
   eufs::journal::RecoveryAction action{};
   std::string detail;
   auto io = std::make_shared<SyncUnknownIo>();
-  Require(eufs::fuse_adapter::OpenStageCState(
+  Require(eufs::fuse_adapter::OpenFuseMountState(
               fixture.image.path, &state, &action, &detail, io) == -EIO &&
               state == nullptr,
-          "recovery sync uncertainty produced a mountable Stage C state");
+          "recovery sync uncertainty produced a mountable state");
   RequireReleasedLock(fixture.image.path);
   unlink(fixture.image.path.c_str());
 }
@@ -306,13 +308,13 @@ void TestPostRecoveryReaderFailureNeverProducesState() {
   WriteBlock(fixture.path, fixture.superblock.inode_bitmap.start_block,
              inode_bitmap);
 
-  std::unique_ptr<eufs::fuse_adapter::StageCState> state;
+  std::unique_ptr<eufs::fuse_adapter::FuseMountState> state;
   eufs::journal::RecoveryAction action{};
   std::string detail;
-  Require(eufs::fuse_adapter::OpenStageCState(
+  Require(eufs::fuse_adapter::OpenFuseMountState(
               fixture.path, &state, &action, &detail) == -EUCLEAN &&
               state == nullptr,
-          "invalid post-recovery Reader produced a mountable Stage C state");
+          "invalid post-recovery Reader produced a mountable state");
   RequireReleasedLock(fixture.path);
   unlink(fixture.path.c_str());
 }
@@ -320,10 +322,10 @@ void TestPostRecoveryReaderFailureNeverProducesState() {
 void TestRuntimeReloadFailureLatchesFailClosedState() {
   auto fixture =
       CreateImage("/tmp/eufs-stage-c-reload-failure-startup-XXXXXX");
-  std::unique_ptr<eufs::fuse_adapter::StageCState> state;
+  std::unique_ptr<eufs::fuse_adapter::FuseMountState> state;
   eufs::journal::RecoveryAction action{};
   std::string detail;
-  Require(eufs::fuse_adapter::OpenStageCState(
+  Require(eufs::fuse_adapter::OpenFuseMountState(
               fixture.path, &state, &action, &detail) == 0,
           detail.c_str());
 
@@ -339,7 +341,7 @@ void TestRuntimeReloadFailureLatchesFailClosedState() {
               state->reader == nullptr && state->fatal_error() == -EUCLEAN,
           "runtime Reader reload failure did not latch fail closed");
   Require(state->ReloadReader(&detail) == -EIO && state->reader == nullptr,
-          "fail-closed Stage C state allowed a later Reader reload");
+          "fail-closed mount state allowed a later Reader reload");
   RequireSessionLock(fixture.path);
   state.reset();
   unlink(fixture.path.c_str());
@@ -356,6 +358,6 @@ int main() {
   TestRecoverySyncUncertaintyNeverProducesState();
   TestPostRecoveryReaderFailureNeverProducesState();
   TestRuntimeReloadFailureLatchesFailClosedState();
-  std::cout << "PASS: Stage C startup recovery matrix\n";
+  std::cout << "PASS: FUSE mount-state startup recovery matrix\n";
   return 0;
 }

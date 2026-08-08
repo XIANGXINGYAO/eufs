@@ -1,6 +1,7 @@
 #pragma once
 
 #include "journal/journal_control_store.h"
+#include "object/request_ledger_index.h"
 #include "storage/image_reader.h"
 #include "storage/mounted_image_session.h"
 
@@ -9,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 
@@ -71,12 +73,19 @@ class ObjectBackend {
   // 仅当 name 不存在时原子发布 name+完整 data；存在返回 EEXIST，绝不覆盖。
   int PutIfAbsent(std::string_view name, std::string_view data,
                   std::uint64_t timestamp_ns, std::string* detail);
+  // RPC 等需要区分“未应用/已提交/持久化未知”的调用者使用此重载。
+  int PutIfAbsent(std::string_view name, std::string_view data,
+                  std::uint64_t timestamp_ns, MutationResult* output,
+                  std::string* detail);
   // 仅当 expected 与当前对象版本完全一致时，原子替换完整 payload。
   int ReplaceIfVersion(std::string_view name, ObjectVersion expected,
                        std::string_view data, std::uint64_t timestamp_ns,
                        MutationResult* output, std::string* detail);
   // 按对象名读取完整内容；失败时调用者 output 保持原值。
   int Get(std::string_view name, std::string* output, std::string* detail);
+  // 在同一个读锁快照中返回正文和元数据，保证 RPC 响应版本与 payload 一致。
+  int Get(std::string_view name, std::string* output, ObjectStat* stat,
+          std::string* detail);
   // 只读取对象大小、时间和 generation，不读取 payload。
   int Stat(std::string_view name, ObjectStat* output, std::string* detail);
   // 返回 Backend 是否仍处于可继续服务的确定持久化状态。
@@ -87,6 +96,7 @@ class ObjectBackend {
       ObjectBackendOptions options,
       std::unique_ptr<storage::MountedImageSession> session,
       std::unique_ptr<storage::ImageReader> reader,
+      std::unique_ptr<RequestLedgerIndex> request_ledger,
       std::shared_ptr<journal::JournalControlIo> mutation_io,
       std::shared_ptr<journal::DurableStageObserver> mutation_observer);
 
@@ -113,9 +123,12 @@ class ObjectBackend {
   ObjectBackendOptions options_;
   std::unique_ptr<storage::MountedImageSession> session_;
   std::unique_ptr<storage::ImageReader> reader_;
+  // feature 开启时必定非空；启动扫描失败则 Backend 根本不会构造。
+  std::unique_ptr<RequestLedgerIndex> request_ledger_;
   std::shared_ptr<journal::JournalControlIo> mutation_io_;
   std::shared_ptr<journal::DurableStageObserver> mutation_observer_;
-  mutable std::mutex mutex_;
+  // 读请求共享稳定 reader；写事务独占到 checkpoint 和 reader 替换完成。
+  mutable std::shared_mutex mutex_;
   int fatal_error_{0};
   std::string fatal_detail_;
 };

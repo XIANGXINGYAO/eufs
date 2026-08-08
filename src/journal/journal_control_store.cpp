@@ -15,6 +15,7 @@
 namespace eufs::journal {
 namespace {
 
+// 临时 fd 的 RAII 所有者，保证任意提前返回都会关闭描述符。
 class FileDescriptor {
  public:
   explicit FileDescriptor(int value) : value_(value) {}
@@ -38,6 +39,7 @@ class FileDescriptor {
   int value_;
 };
 
+// 生产环境 I/O 实现；测试通过 JournalControlIo 注入短写和 sync 失败。
 class SystemJournalControlIo final : public JournalControlIo {
  public:
   ssize_t Pwrite(int fd, const std::uint8_t* input, std::size_t size,
@@ -48,6 +50,7 @@ class SystemJournalControlIo final : public JournalControlIo {
   int Fdatasync(int fd) override { return fdatasync(fd); }
 };
 
+// 复用一个无状态系统 I/O 实例。
 std::shared_ptr<JournalControlIo> SystemIo() {
   static const auto io = std::make_shared<SystemJournalControlIo>();
   return io;
@@ -68,6 +71,7 @@ void SetSystemDetail(std::string* detail, std::string_view operation,
   }
 }
 
+// 固定宽度 pread/pwrite 必须循环处理 EINTR 和短传输。
 int PreadAll(int fd, std::uint8_t* output, std::size_t size,
              std::uint64_t offset, std::string_view operation,
              std::string* detail) {
@@ -117,6 +121,7 @@ int PwriteAll(JournalControlIo* io, int fd, const std::uint8_t* input,
   return 0;
 }
 
+// 以下比较函数分别验证 control 身份、完整状态和 ring reservation 是否一致。
 bool HasSameIdentity(const JournalControl& first,
                      const JournalControl& second) {
   return first.ring_blocks == second.ring_blocks &&
@@ -146,6 +151,7 @@ bool SameReservation(const RingReservationPlan& first,
          SameControlState(first.exposed_control, second.exposed_control);
 }
 
+// metadata home block 不能指向 journal 自己。
 bool BlockIsInRegion(std::uint32_t block, const ondisk::Region& region) {
   return block >= region.start_block &&
          static_cast<std::uint64_t>(block) <
@@ -159,6 +165,7 @@ bool IsValidMetadataTarget(const ondisk::Superblock& superblock,
          !BlockIsInRegion(block, superblock.journal);
 }
 
+// 安全地把 ring 逻辑下标转换为镜像字节偏移。
 bool RingOffset(const ondisk::Superblock& superblock,
                 std::uint32_t ring_index, std::uint64_t* output,
                 std::string* detail) {
@@ -183,6 +190,7 @@ bool RingOffset(const ondisk::Superblock& superblock,
   return true;
 }
 
+// 从 fd 读取并验证 superblock、A/B control，最后选择唯一当前 control。
 int LoadControlStateFromFd(int fd, ondisk::Superblock* superblock_output,
                            JournalControl* current_output,
                            ControlCopy* current_copy_output,
@@ -209,7 +217,8 @@ int LoadControlStateFromFd(int fd, ondisk::Superblock* superblock_output,
   if (!ondisk::DecodeSuperblock(superblock_bytes, &superblock, detail)) {
     return -EUCLEAN;
   }
-  if (superblock.feature_incompat != 0) {
+  if ((superblock.feature_incompat &
+       ~ondisk::kSupportedFeatureIncompat) != 0) {
     SetDetail(detail, "image requires unsupported incompatible features");
     return -EOPNOTSUPP;
   }
@@ -252,8 +261,9 @@ int LoadControlStateFromFd(int fd, ondisk::Superblock* superblock_output,
   return 0;
 }
 
-}  // namespace
+}  // 匿名命名空间：I/O、比较和 control 选择辅助函数不导出。
 
+// 私有构造只接收已经完整验证的镜像状态。
 JournalControlStore::JournalControlStore(
     int fd, const ondisk::Superblock& superblock,
     const JournalControl& current, ControlCopy current_copy,
@@ -266,12 +276,14 @@ JournalControlStore::JournalControlStore(
       io_(io),
       observer_(std::move(observer)) {}
 
+// 关闭本 store 接管的 fd。
 JournalControlStore::~JournalControlStore() {
   if (fd_ >= 0) {
     close(fd_);
   }
 }
 
+// 独立打开并独占锁定镜像，再加载当前 control。
 int JournalControlStore::Open(
     const std::string& image_path,
     std::unique_ptr<JournalControlStore>* output, std::string* detail,
@@ -312,6 +324,7 @@ int JournalControlStore::Open(
   return 0;
 }
 
+// 接管 session 复制出的已加锁 fd；无论成功失败都消费该 fd。
 int JournalControlStore::AdoptLockedFd(
     int locked_fd, std::unique_ptr<JournalControlStore>* output,
     std::string* detail, std::shared_ptr<JournalControlIo> io,
@@ -351,6 +364,7 @@ int JournalControlStore::AdoptLockedFd(
   return 0;
 }
 
+// 验证计划 before-image 后，先持久化 ordered data，再写未暴露日志体。
 int JournalControlStore::WriteOrderedDataAndUnexposedBody(
     std::uint32_t expected_total_blocks,
     const std::array<std::uint8_t, 16>& expected_filesystem_uuid,
@@ -472,6 +486,7 @@ int JournalControlStore::WriteOrderedDataAndUnexposedBody(
                             detail);
 }
 
+// 编码 descriptor 和 metadata payload，写入预留 ring 并整体 fdatasync。
 int JournalControlStore::WriteUnexposedBody(
     const RingReservationPlan& reservation,
     const std::map<std::uint32_t, ondisk::Block>& metadata_after_images,
@@ -589,6 +604,7 @@ int JournalControlStore::WriteUnexposedBody(
   return 0;
 }
 
+// 交替写下一份 A/B control，使恢复器能定位已经持久化的日志体。
 int JournalControlStore::ExposeDurableBody(std::string* detail) {
   if (reload_required_) {
     SetDetail(detail,
@@ -613,6 +629,7 @@ int JournalControlStore::ExposeDurableBody(std::string* detail) {
   return result;
 }
 
+// 在唯一推导的 ring 位置写入并持久化 COMMIT。
 int JournalControlStore::WriteCommit(std::string* detail) {
   if (detail != nullptr) {
     detail->clear();
@@ -678,6 +695,7 @@ int JournalControlStore::WriteCommit(std::string* detail) {
   return 0;
 }
 
+// 回放已提交 metadata home block，持久化后再 checkpoint control。
 int JournalControlStore::CompleteCommittedTransaction(std::string* detail) {
   if (detail != nullptr) {
     detail->clear();
@@ -742,6 +760,7 @@ int JournalControlStore::CompleteCommittedTransaction(std::string* detail) {
   return 0;
 }
 
+// 把 next 写到非当前 control copy，fdatasync 后才切换内存 current_。
 int JournalControlStore::PersistNext(const JournalControl& next,
                                      std::string* detail) {
   if (detail != nullptr) {
@@ -803,3 +822,18 @@ int JournalControlStore::PersistNext(const JournalControl& next,
 }
 
 }  // namespace eufs::journal
+  // 只有确定、干净、没有其他事务的 store 才允许开始新事务。
+  // planner 的 total_blocks/UUID 必须绑定当前镜像，before-image 必须匹配 home。
+  // 新 COW 数据块直接写 home 并 fdatasync，此时旧 inode 仍不引用它们。
+  // 数据持久化成功后才进入 metadata 日志体写入。
+  // 重新基于 current_ 计算 expected reservation，拒绝基于旧 control 的计划。
+  // descriptor entry 按 home block 稳定排序并绑定每个 payload CRC。
+  // 日志体 fdatasync 前 control 仍为空，崩溃后这些字节不会被恢复器采用。
+  // 全部持久化后才发布 durable_body_ 和 metadata_after_images_ 内存状态。
+  // COMMIT 重新绑定 descriptor 位置、CRC、entry 数和事务总长度。
+  // fdatasync 成功后 commit_durable_ 才能置 true；失败要求重新打开重选 control。
+  // home block 部分写入或 sync 失败时保留 COMMIT，重启恢复可再次幂等回放。
+  // 所有 home block 确认持久化后才清空 used_blocks。
+  // identity 字段不可变，generation 必须恰好是当前值加一。
+  // 当前 A 有效就写 B，当前 B 有效就写 A，永不原地覆盖唯一有效副本。
+  // sync 成功后才更新内存 control/copy；失败置 reload_required_。

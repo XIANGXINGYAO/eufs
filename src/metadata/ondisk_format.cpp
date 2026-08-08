@@ -9,6 +9,7 @@
 namespace eufs::ondisk {
 namespace {
 
+// EUFS superblock magic 和两个 CRC 字段固定偏移属于 v1 持久化 ABI。
 constexpr std::array<std::uint8_t, 8> kMagic{
     'E', 'U', 'F', 'S', 'I', 'M', 'G', '1'};
 
@@ -21,6 +22,7 @@ void SetError(std::string* error, std::string_view message) {
   }
 }
 
+// 16/32/64 位整数均显式 little-endian 编解码，禁止直接 memcpy 主机结构。
 void PutLe16(std::uint8_t* output, std::uint16_t value) {
   output[0] = static_cast<std::uint8_t>(value);
   output[1] = static_cast<std::uint8_t>(value >> 8U);
@@ -59,23 +61,27 @@ std::uint64_t GetLe64(const std::uint8_t* input) {
   return value;
 }
 
+// 向上整除，用于把字节/记录数量转换成块数量。
 std::uint32_t CeilDivide(std::uint64_t numerator,
                          std::uint32_t denominator) {
   return static_cast<std::uint32_t>((numerator + denominator - 1U) /
                                     denominator);
 }
 
+// 验证连续区域恰好在 expected_end 结束，防止间隙和重叠。
 bool RegionEndsAt(const Region& region, std::uint32_t expected_end) {
   return static_cast<std::uint64_t>(region.start_block) +
              region.block_count ==
          expected_end;
 }
 
+// 保留区域必须全零，旧 reader 才能拒绝未知新格式扩展。
 bool BytesAreZero(const std::uint8_t* bytes, std::size_t size) {
   return std::all_of(bytes, bytes + size,
                      [](std::uint8_t value) { return value == 0; });
 }
 
+// 验证 superblock 的总量、区域连续性、最小 journal 和数据区边界。
 bool ValidateSuperblock(const Superblock& value, std::string* error) {
   if (value.total_blocks < 8) {
     SetError(error, "total_blocks is too small");
@@ -137,6 +143,7 @@ bool ValidateSuperblock(const Superblock& value, std::string* error) {
   return true;
 }
 
+// v1 inode 只接受普通文件或目录类型。
 bool IsKnownMode(std::uint32_t mode) {
   const mode_t type = static_cast<mode_t>(mode) & S_IFMT;
   return type == S_IFREG || type == S_IFDIR;
@@ -147,6 +154,7 @@ bool IsKnownDirectoryFileType(DirectoryFileType type) {
          type == DirectoryFileType::kDirectory;
 }
 
+// 目录名称不能含 NUL/斜杠，也不能是空、`.` 或 `..`。
 bool IsValidName(std::string_view name) {
   return !name.empty() && name != "." && name != ".." &&
          name.size() <= kMaxNameLength &&
@@ -154,8 +162,9 @@ bool IsValidName(std::string_view name) {
          name.find('\0') == std::string_view::npos;
 }
 
-}  // namespace
+}  // 匿名命名空间：固定宽度字节布局辅助函数不导出。
 
+// Castagnoli 多项式 CRC32C，用于 superblock、inode、journal 和 payload 校验。
 std::uint32_t Crc32c(const std::uint8_t* data, std::size_t size) {
   std::uint32_t crc = 0xFFFFFFFFU;
   for (std::size_t index = 0; index < size; ++index) {
@@ -168,6 +177,7 @@ std::uint32_t Crc32c(const std::uint8_t* data, std::size_t size) {
   return ~crc;
 }
 
+// 按 superblock -> inode bitmap -> block bitmap -> inode table -> journal -> data 排布区域。
 bool BuildSuperblockLayout(std::uint32_t total_blocks,
                            std::uint32_t total_inodes,
                            std::uint32_t journal_blocks, Superblock* output,
@@ -214,6 +224,7 @@ bool BuildSuperblockLayout(std::uint32_t total_blocks,
   return true;
 }
 
+// 严格验证后编码 superblock，checksum 字段清零参与计算再写回。
 bool EncodeSuperblock(const Superblock& value, Block* output,
                       std::string* error) {
   if (output == nullptr) {
@@ -257,6 +268,7 @@ bool EncodeSuperblock(const Superblock& value, Block* output,
   return true;
 }
 
+// 校验 magic/version/CRC/保留字节后解码并再次验证几何。
 bool DecodeSuperblock(const Block& input, Superblock* output,
                       std::string* error) {
   if (output == nullptr) {
@@ -317,6 +329,7 @@ bool DecodeSuperblock(const Block& input, Superblock* output,
   return ValidateSuperblock(*output, error);
 }
 
+// 编码固定 128 字节 inode；未使用字段和尾部保持零。
 bool EncodeInode(const InodeRecord& value, InodeBytes* output,
                  std::string* error) {
   if (output == nullptr) {
@@ -354,6 +367,7 @@ bool EncodeInode(const InodeRecord& value, InodeBytes* output,
   return true;
 }
 
+// 解码 inode 并验证槽位编号、类型、size 与 direct/indirect 指针形态。
 bool DecodeInode(const InodeBytes& input, std::uint32_t expected_inode_number,
                  InodeRecord* output, std::string* error) {
   if (output == nullptr) {
@@ -407,11 +421,13 @@ bool DecodeInode(const InodeBytes& input, std::uint32_t expected_inode_number,
   return true;
 }
 
+// 目录项长度按 4 字节向上对齐。
 std::size_t MinimumDirectoryRecordLength(std::size_t name_length) {
   const std::size_t unaligned = kDirectoryEntryHeaderSize + name_length;
   return (unaligned + 3U) & ~std::size_t{3U};
 }
 
+// 在显式 record_length 内编码目录项，剩余 slack 清零供后续分裂。
 bool EncodeDirectoryEntry(const DirectoryEntry& value,
                           std::uint16_t record_length, std::uint8_t* output,
                           std::size_t output_size, std::string* error) {
@@ -440,6 +456,7 @@ bool EncodeDirectoryEntry(const DirectoryEntry& value,
   return true;
 }
 
+// 严格检查 record_length、name_length、对齐、类型和名称后解码。
 bool DecodeDirectoryEntry(const std::uint8_t* input, std::size_t input_size,
                           DirectoryEntry* output, std::string* error) {
   if (input == nullptr || output == nullptr ||

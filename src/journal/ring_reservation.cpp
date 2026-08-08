@@ -8,6 +8,7 @@
 namespace eufs::journal {
 namespace {
 
+// 设置错误详情并返回统一负 errno。
 int Fail(std::string* detail, int error_number, std::string_view message) {
   if (detail != nullptr) {
     detail->assign(message);
@@ -15,14 +16,16 @@ int Fail(std::string* detail, int error_number, std::string_view message) {
   return -error_number;
 }
 
+// ring 逻辑位置前进并在末尾取模回绕。
 std::uint32_t Advance(std::uint32_t start, std::size_t distance,
                       std::uint32_t ring_blocks) {
   return static_cast<std::uint32_t>(
       (static_cast<std::uint64_t>(start) + distance) % ring_blocks);
 }
 
-}  // namespace
+}  // 匿名命名空间。
 
+// 为一个 metadata 事务纯计算 descriptor、payload、COMMIT 和新 control 边界。
 int PlanRingReservation(const JournalControl& current,
                         std::size_t metadata_payload_count,
                         RingReservationPlan* output, std::string* detail) {
@@ -104,3 +107,7 @@ int PlanRingReservation(const JournalControl& current,
 }
 
 }  // namespace eufs::journal
+  // 输出地址、空 ring 和当前 control 几何必须先满足基本契约。
+  // v1 同时只允许一个暴露事务，当前 used_blocks 非零时必须先恢复/checkpoint。
+  // 事务占用块数固定为 1 个 descriptor + N 个 payload + 1 个 COMMIT。
+  // 只有整个 candidate 构造成功后才覆盖调用者 output。

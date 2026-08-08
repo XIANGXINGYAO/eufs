@@ -14,6 +14,7 @@
 
 namespace eufs::metadata {
 
+// Backend 根对象名校验：禁止空名、`.`、`..`、斜杠、NUL 和超长名称。
 bool IsValidRootObjectName(std::string_view name) {
   return !name.empty() && name != "." && name != ".." &&
          name.size() <= ondisk::kMaxNameLength &&
@@ -23,6 +24,7 @@ bool IsValidRootObjectName(std::string_view name) {
 
 namespace {
 
+// 本文件把完整对象内容、inode、目录项、bitmap 和间接块联合成一次原子发布计划。
 void SetDetail(std::string* detail, std::string_view message) {
   if (detail != nullptr) {
     detail->assign(message);
@@ -36,6 +38,7 @@ void PutLe32(std::uint8_t* output, std::uint32_t value) {
   output[3] = static_cast<std::uint8_t>((value >> 24U) & 0xFFU);
 }
 
+// 计算完整对象需要的数据块数。
 std::uint32_t RequiredBlocks(std::uint64_t size) {
   return size == 0
              ? 0
@@ -91,6 +94,7 @@ std::size_t InodeOffsetInBlock(std::uint32_t inode_number) {
   return static_cast<std::size_t>(byte_index % ondisk::kBlockSize);
 }
 
+// 从 allocator 预留一个块，并保存 reservation 以便失败自动回滚。
 int ReserveBlock(storage::BitmapAllocator* allocator,
                  std::vector<storage::BitmapReservation>* reservations,
                  std::uint32_t* block, std::string* detail) {
@@ -107,6 +111,7 @@ int ReserveBlock(storage::BitmapAllocator* allocator,
   return 0;
 }
 
+// 首次编辑 metadata home block 时读取 before-image，后续复用同一 after-image。
 int MutableMetadataBlock(const storage::ImageReader& image,
                          std::uint32_t block_number, NewObjectPlan* plan,
                          ondisk::Block** output, std::string* detail) {
@@ -126,6 +131,7 @@ int MutableMetadataBlock(const storage::ImageReader& image,
   return 0;
 }
 
+// 尝试在现有目录块中分裂空闲 record_length 并插入新目录项。
 bool TryInsertDirectoryEntry(const ondisk::DirectoryEntry& new_entry,
                              ondisk::Block* block, std::string* detail) {
   const std::size_t new_minimum =
@@ -167,6 +173,7 @@ bool TryInsertDirectoryEntry(const ondisk::DirectoryEntry& new_entry,
   return false;
 }
 
+// 比较 bitmap before/after，只把真正变化的 bitmap 块加入 metadata 事务。
 int AddBitmapAfterImages(const storage::ImageReader& image,
                          const ondisk::Region& region,
                          const std::vector<std::uint8_t>& before,
@@ -194,8 +201,9 @@ int AddBitmapAfterImages(const storage::ImageReader& image,
   return 0;
 }
 
-}  // namespace
+}  // 匿名命名空间。
 
+// 原子规划根目录新对象；目录无空间时可增长 direct/single-indirect 映射。
 int PrepareNewRootObject(const storage::ImageReader& image,
                          std::string_view name, std::string_view data,
                          std::uint32_t permissions, std::uint32_t uid,
@@ -493,3 +501,9 @@ int PrepareNewRootObject(const storage::ImageReader& image,
 }
 
 }  // namespace eufs::metadata
+  // 先检查名称、权限、大小和输出契约，再查重。
+  // 新 inode、所有数据块和必要间接块先在 bitmap 内存副本中预留。
+  // payload 被拆成完整 COW 数据块，块内未使用尾部保持 0。
+  // 优先插入现有目录块；全部装不下时为根目录分配新数据块。
+  // inode/目录/bitmap/间接块是 metadata after-image，随唯一 COMMIT 一起发布。
+  // candidate 全部完成后才 KeepReserved 并写入 output。

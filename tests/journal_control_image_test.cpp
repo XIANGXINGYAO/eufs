@@ -1,3 +1,5 @@
+// 在真实镜像块上验证 A/B journal control 的编码、代际选择和损坏副本降级规则。
+// 两份 control 都无效时必须拒绝继续，而不能猜测日志边界。
 #include "journal/ondisk_journal.h"
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"

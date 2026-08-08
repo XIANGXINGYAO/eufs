@@ -8,6 +8,7 @@
 namespace eufs::journal {
 namespace {
 
+// 三种记录各有独立 8 字节 magic，避免把任意 payload 或旧数据误解码成协议记录。
 constexpr std::array<std::uint8_t, 8> kDescriptorMagic = {
     'E', 'U', 'F', 'S', 'J', 'D', 'S', '1'};
 constexpr std::array<std::uint8_t, 8> kCommitMagic = {
@@ -17,12 +18,14 @@ constexpr std::array<std::uint8_t, 8> kControlMagic = {
 constexpr std::size_t kRecordChecksumOffset = 60;
 constexpr std::size_t kControlChecksumOffset = 124;
 
+// 写入可选错误文本。
 void SetError(std::string* error, std::string_view message) {
   if (error != nullptr) {
     error->assign(message);
   }
 }
 
+// 所有多字节整数显式按 little-endian 编解码，磁盘格式不依赖宿主机端序或对齐。
 void PutLe32(std::uint8_t* output, std::uint32_t value) {
   for (std::size_t index = 0; index < sizeof(value); ++index) {
     output[index] = static_cast<std::uint8_t>(value >> (index * 8U));
@@ -51,17 +54,20 @@ std::uint64_t GetLe64(const std::uint8_t* input) {
   return value;
 }
 
+// 检查固定记录有效区之后的保留字节必须全部为 0，防止未知扩展被旧版本静默接受。
 bool IsZeroRange(const ondisk::Block& block, std::size_t begin) {
   return std::all_of(block.begin() + begin, block.end(),
                      [](std::uint8_t value) { return value == 0; });
 }
 
+// 计算整块 CRC 时先把 checksum 字段清零，编码与解码使用同一规则。
 std::uint32_t ComputeBlockChecksum(ondisk::Block block,
                                    std::size_t checksum_offset) {
   PutLe32(block.data() + checksum_offset, 0);
   return ondisk::Crc32c(block.data(), block.size());
 }
 
+// 验证 control 的 ring 几何、head/tail/used 关系和协议保留位。
 bool ValidateControlFields(const JournalControl& value, std::string* error) {
   if (value.ring_blocks < ondisk::kMinimumJournalRingBlocks ||
       value.head >= value.ring_blocks ||
@@ -88,6 +94,7 @@ bool ValidateControlFields(const JournalControl& value, std::string* error) {
   return true;
 }
 
+// 判断两份 control 是否描述完全相同状态，用于 generation 相同场景。
 bool ControlsEquivalent(const JournalControl& first,
                         const JournalControl& second) {
   return first.ring_blocks == second.ring_blocks &&
@@ -102,6 +109,7 @@ bool ControlsEquivalent(const JournalControl& first,
          first.feature_incompat == second.feature_incompat;
 }
 
+// 验证 descriptor entry 数量、home block 唯一性和 flags 保留位。
 bool ValidateDescriptorEntries(const std::vector<DescriptorEntry>& entries,
                                std::string* error) {
   if (entries.empty() || entries.size() > kMaxDescriptorEntries) {
@@ -127,8 +135,9 @@ bool ValidateDescriptorEntries(const std::vector<DescriptorEntry>& entries,
   return true;
 }
 
-}  // namespace
+}  // 匿名命名空间：字节编解码辅助函数不导出。
 
+// 把内存 control 严格编码为固定 4096 字节块并写入 CRC。
 bool EncodeControl(const JournalControl& value, ondisk::Block* output,
                    std::uint32_t* checksum, std::string* error) {
   if (output == nullptr) {
@@ -167,6 +176,7 @@ bool EncodeControl(const JournalControl& value, ondisk::Block* output,
   return true;
 }
 
+// 验证 magic、版本、CRC、保留字节和字段不变量后解码 control。
 bool DecodeControl(const ondisk::Block& input, JournalControl* output,
                    std::string* error) {
   if (output == nullptr) {
@@ -215,6 +225,7 @@ bool DecodeControl(const ondisk::Block& input, JournalControl* output,
   return true;
 }
 
+// 使用模 2^64 序号规则比较 generation，半圈差值返回 ambiguous。
 GenerationComparison CompareGenerations(std::uint64_t first,
                                         std::uint64_t second) {
   if (first == second) {
@@ -229,6 +240,7 @@ GenerationComparison CompareGenerations(std::uint64_t first,
                                  : GenerationComparison::kSecondNewer;
 }
 
+// 独立解码 A/B control，排除无效 copy，并选择唯一更新者或等价副本。
 bool SelectControl(const ondisk::Block& control_a,
                    const ondisk::Block& control_b,
                    const std::array<std::uint8_t, 16>& expected_uuid,
@@ -291,6 +303,7 @@ bool SelectControl(const ondisk::Block& control_a,
   return true;
 }
 
+// 编码 descriptor 头和全部 entry；checksum 同时返回给 COMMIT 绑定。
 bool EncodeDescriptor(const DescriptorRecord& value, ondisk::Block* output,
                       std::uint32_t* checksum, std::string* error) {
   if (output == nullptr || value.transaction_id == 0 || value.flags != 0 ||
@@ -343,6 +356,7 @@ bool EncodeDescriptor(const DescriptorRecord& value, ondisk::Block* output,
   return true;
 }
 
+// 解码并验证 descriptor，不接受超量 entry、非零保留字段或 CRC 错误。
 bool DecodeDescriptor(const ondisk::Block& input, DescriptorRecord* output,
                       std::string* error) {
   if (output == nullptr) {
@@ -411,6 +425,7 @@ bool DecodeDescriptor(const ondisk::Block& input, DescriptorRecord* output,
   return true;
 }
 
+// 编码固定宽度 COMMIT，它不携带 payload，只绑定 descriptor 身份和边界。
 bool EncodeCommit(const CommitRecord& value, ondisk::Block* output,
                   std::string* error) {
   if (output == nullptr || value.transaction_id == 0 || value.entry_count == 0 ||
@@ -440,6 +455,7 @@ bool EncodeCommit(const CommitRecord& value, ondisk::Block* output,
   return true;
 }
 
+// 解码并验证 COMMIT 的 magic、版本、保留位和整块 CRC。
 bool DecodeCommit(const ondisk::Block& input, CommitRecord* output,
                   std::string* error) {
   if (output == nullptr) {
@@ -485,6 +501,7 @@ bool DecodeCommit(const ondisk::Block& input, CommitRecord* output,
   return true;
 }
 
+// 交叉检查 COMMIT 的事务号、UUID、entry 数、总长度、descriptor 位置与 CRC。
 bool CommitMatchesDescriptor(const DescriptorRecord& descriptor,
                              std::uint32_t descriptor_ring_index,
                              const CommitRecord& commit,

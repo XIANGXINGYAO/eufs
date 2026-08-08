@@ -1,8 +1,10 @@
 #pragma once
 
+// 测试专用直接落盘接口；调用者必须明确接受它不经过 journal 的事实。
+// 这些函数只用于生成 fixture，不属于挂载后可用能力。
 #include "metadata/empty_file_create_plan.h"
 #include "metadata/file_write_plan.h"
-#include "metadata/first_block_write_plan.h"
+#include "tests/support/first_block_write_plan.h"
 
 #include <string>
 

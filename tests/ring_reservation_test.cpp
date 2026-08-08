@@ -1,3 +1,5 @@
+// 验证环形日志为 descriptor、payload 和 COMMIT 预留位置时的回绕数学与容量拒绝。
+// 预留结果必须唯一，恢复端才能从 descriptor 推导 COMMIT 的合法位置。
 #include "journal/ring_reservation.h"
 
 #include <cerrno>

@@ -21,7 +21,7 @@ multi-transaction circular reclaim are not implemented yet.
 This format is one component of a metadata redo journal, not an isolated
 serialization exercise.
 
-Redo was selected over undo logging because the Stage C planners already
+Redo was selected over undo logging because the metadata planners already
 produce complete final block after-images and replaying those images is
 idempotent. Copy-on-write was rejected because it would require a different
 tree/root-pointer disk architecture.

@@ -134,7 +134,13 @@ void TestDirectApiAndFailureContracts() {
           "second object backend bypassed the image lifecycle lock");
 
   const std::string payload("alpha\0beta", 10);
-  Require(backend->PutIfAbsent("binary.bin", payload, 100, &detail) == 0,
+  eufs::object_store::MutationResult creation;
+  Require(backend->PutIfAbsent("binary.bin", payload, 100, &creation,
+                               &detail) == 0 &&
+              creation.outcome ==
+                  eufs::object_store::MutationOutcome::kCommitted &&
+              creation.committed_version.inode_number != 0 &&
+              creation.committed_version.generation == 1,
           detail.c_str());
   std::string contents;
   Require(backend->Get("binary.bin", &contents, &detail) == 0 &&
@@ -332,7 +338,13 @@ void TestUncertainDurabilityFailsClosed() {
               action == eufs::journal::RecoveryAction::kNoAction,
           detail.c_str());
 
-  Require(backend->PutIfAbsent("uncertain", "payload", 30, &detail) == -EIO &&
+  eufs::object_store::MutationResult creation;
+  Require(backend->PutIfAbsent("uncertain", "payload", 30, &creation,
+                               &detail) == -EIO &&
+              creation.outcome ==
+                  eufs::object_store::MutationOutcome::kUnknown &&
+              creation.current_version.inode_number == 0 &&
+              creation.current_version.generation == 0 &&
               !backend->usable(),
           "uncertain ordered-data durability did not fail the backend closed");
   std::string output = "unchanged";

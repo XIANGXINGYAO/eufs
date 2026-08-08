@@ -1,11 +1,13 @@
+// 用阶段观察器记录 ordered-data WAL 的六个持久化边界，并在各边界注入失败。
+// 测试确保顺序固定为数据、日志体、control、COMMIT、home blocks、checkpoint。
 #include "journal/journal_control_store.h"
 #include "journal/ondisk_journal.h"
 #include "metadata/empty_file_create_plan.h"
-#include "metadata/first_block_write_plan.h"
+#include "tests/support/first_block_write_plan.h"
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>

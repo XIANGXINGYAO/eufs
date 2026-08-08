@@ -1,10 +1,12 @@
+// 构造重复块引用、漏标块和非法块号，验证物理块引用图与 block bitmap 的交叉检查。
+// 失败意味着 eufsck 可能漏报同一数据块被多个 inode 共享的破坏。
 #include "checker/consistency_checker.h"
 #include "metadata/empty_file_create_plan.h"
-#include "metadata/first_block_write_plan.h"
+#include "tests/support/first_block_write_plan.h"
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>

@@ -1,9 +1,11 @@
+// 对比目录项实际引用次数与 inode.link_count，验证硬链接计数不变量。
+// 物理 inode 扫描和命名空间引用统计在这里被刻意分成两个阶段验证。
 #include "checker/consistency_checker.h"
 #include "metadata/empty_file_create_plan.h"
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
-#include "storage/writable_image.h"
+#include "tests/support/writable_image.h"
 
 #include <algorithm>
 #include <array>

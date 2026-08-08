@@ -13,12 +13,14 @@
 namespace eufs::metadata {
 namespace {
 
+// 写入可选计划错误详情。
 void SetDetail(std::string* detail, std::string_view message) {
   if (detail != nullptr) {
     detail->assign(message);
   }
 }
 
+// 把一个连续 metadata 区域逐块加载为字节数组，供 bitmap allocator 使用。
 int LoadRegion(const storage::ImageReader& image, const ondisk::Region& region,
                std::vector<std::uint8_t>* output, std::string* detail) {
   output->assign(static_cast<std::size_t>(region.block_count) *
@@ -38,6 +40,7 @@ int LoadRegion(const storage::ImageReader& image, const ondisk::Region& region,
   return 0;
 }
 
+// 从完整 bitmap 字节数组取出一个 4096 字节 home block。
 void CopyBitmapBlock(const std::vector<std::uint8_t>& bitmap,
                      std::uint32_t local_block, ondisk::Block* output) {
   const auto begin = bitmap.begin() +
@@ -46,6 +49,7 @@ void CopyBitmapBlock(const std::vector<std::uint8_t>& bitmap,
   std::copy_n(begin, ondisk::kBlockSize, output->begin());
 }
 
+// 首次修改某 metadata 块时同时保存 before-image，并返回可继续编辑的 after-image。
 int MutableExistingBlock(const storage::ImageReader& image,
                          std::uint32_t block_number,
                          std::map<std::uint32_t, ondisk::Block>* blocks,
@@ -62,6 +66,7 @@ int MutableExistingBlock(const storage::ImageReader& image,
   return 0;
 }
 
+// 根据固定 128 字节 inode 记录计算其所在 inode table 物理块及块内偏移。
 std::uint32_t InodeTableBlock(const ondisk::Superblock& superblock,
                               std::uint32_t inode_number) {
   const std::uint64_t byte_index =
@@ -78,8 +83,9 @@ std::size_t InodeOffsetInBlock(std::uint32_t inode_number) {
   return static_cast<std::size_t>(byte_index % ondisk::kBlockSize);
 }
 
-}  // namespace
+}  // 匿名命名空间：计划构造辅助函数不导出。
 
+// 在根目录已有数据块中插入新目录项，并联合规划 inode/目录/bitmap after-image。
 int PrepareRootEmptyFileCreate(const storage::ImageReader& image,
                                std::string_view name,
                                std::uint32_t permissions, std::uint32_t uid,
@@ -249,3 +255,7 @@ int PrepareRootEmptyFileCreate(const storage::ImageReader& image,
 }
 
 }  // namespace eufs::metadata
+  // planner 只接受单层合法名称和 POSIX 权限低 9 位。
+  // 先确认同名路径确实不存在；其他解析错误不能被当作可创建。
+  // inode bitmap reservation 使用 RAII，后续任一步失败都会自动回滚内存位。
+  // before/after 最终完整后才 KeepReserved 并发布 candidate。

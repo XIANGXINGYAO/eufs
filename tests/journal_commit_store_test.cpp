@@ -1,3 +1,5 @@
+// 验证 COMMIT 只能写在 descriptor 推导的唯一 ring 位置，并覆盖完整事务校验信息。
+// 合法 COMMIT 是恢复采用事务的必要条件，但不是脱离 descriptor 的独立真相。
 #include "journal/journal_control_store.h"
 #include "journal/ondisk_journal.h"
 #include "journal/ring_reservation.h"

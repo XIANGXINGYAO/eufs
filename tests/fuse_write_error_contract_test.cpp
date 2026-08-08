@@ -1,8 +1,10 @@
 #define FUSE_USE_VERSION 31
 
+// 从 FUSE 回调层验证写失败返回负 errno，并在持久化边界不确定时关闭后续写服务。
+// 同时检查错误路径不会把部分修改伪装成一次成功 write。
 #include "checker/consistency_checker.h"
-#include "fuse/read_only_operations.h"
-#include "fuse/stage_c_state.h"
+#include "fuse/operations.h"
+#include "fuse/mount_state.h"
 #include "metadata/ondisk_format.h"
 #include "storage/mkfs.h"
 
@@ -81,12 +83,12 @@ std::string CreateImage() {
   return options.image_path;
 }
 
-std::unique_ptr<eufs::fuse_adapter::StageCState> OpenState(
+std::unique_ptr<eufs::fuse_adapter::FuseMountState> OpenState(
     const std::string& path) {
-  std::unique_ptr<eufs::fuse_adapter::StageCState> state;
+  std::unique_ptr<eufs::fuse_adapter::FuseMountState> state;
   eufs::journal::RecoveryAction action{};
   std::string detail;
-  Require(eufs::fuse_adapter::OpenStageCState(
+  Require(eufs::fuse_adapter::OpenFuseMountState(
               path, &state, &action, &detail) == 0 &&
               action == eufs::journal::RecoveryAction::kNoAction,
           detail.c_str());
@@ -107,7 +109,7 @@ void RequireHealthy(const std::string& path) {
           "write error contract left an inconsistent image");
 }
 
-void RequireFileState(const eufs::fuse_adapter::StageCState& state,
+void RequireFileState(const eufs::fuse_adapter::FuseMountState& state,
                       std::uint32_t inode_number, std::uint64_t expected_size,
                       char expected_first_byte) {
   eufs::ondisk::InodeRecord inode;
@@ -131,7 +133,7 @@ void TestWriteErrorsAreNonFatalAndNonMutating() {
   g_fuse_context.gid = getgid();
 
   const fuse_operations operations =
-      eufs::fuse_adapter::MakeReadOnlyOperations();
+      eufs::fuse_adapter::MakeOperations();
   Require(operations.create != nullptr && operations.write != nullptr,
           "production FUSE create/write callbacks are missing");
 
@@ -209,7 +211,7 @@ void TestWriteErrorsAreNonFatalAndNonMutating() {
 
 }  // namespace
 
-// The production callbacks obtain StageCState through this libfuse boundary.
+// The production callbacks obtain FuseMountState through this libfuse boundary.
 // Owning it here keeps the callback test runnable on CI hosts without /dev/fuse.
 extern "C" struct fuse_context* fuse_get_context() {
   return &g_fuse_context;

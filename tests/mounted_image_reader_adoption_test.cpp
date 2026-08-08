@@ -1,3 +1,5 @@
+// 验证 ImageReader 从 MountedImageSession 的复制 fd 建立，而不是再次按路径竞争 flock。
+// reader 的析构只关闭自己的 fd，不得提前释放会话主 fd 的生命周期。
 #include "storage/image_reader.h"
 #include "storage/mkfs.h"
 #include "storage/mounted_image_session.h"

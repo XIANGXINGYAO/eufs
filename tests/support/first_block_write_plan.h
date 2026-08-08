@@ -1,5 +1,7 @@
 #pragma once
 
+// 早期“空文件第一次写入”测试计划接口，仅供恢复与兼容性测试复现旧场景。
+// 当前生产写路径使用 metadata/file_write_plan.h。
 #include "metadata/ondisk_format.h"
 #include "storage/image_reader.h"
 

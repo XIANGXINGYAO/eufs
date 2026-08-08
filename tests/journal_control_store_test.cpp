@@ -1,3 +1,5 @@
+// 验证 JournalControlStore 接管已锁 fd 后的 control 读取、切换和持久化顺序。
+// 该测试保护“只写另一份副本、同步成功后才承认新代际”的核心规则。
 #include "journal/journal_control_store.h"
 #include "journal/ondisk_journal.h"
 #include "metadata/ondisk_format.h"

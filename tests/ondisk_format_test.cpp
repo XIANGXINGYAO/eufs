@@ -1,3 +1,5 @@
+// 对 v1 superblock、inode 和 directory entry 做编码/解码往返及非法输入拒绝测试。
+// 这些测试锁定磁盘 ABI，防止 C++ 结构体布局或主机字节序泄漏到镜像格式。
 #include "metadata/ondisk_format.h"
 
 #include <array>
