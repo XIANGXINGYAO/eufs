@@ -177,6 +177,28 @@ int Scan(const std::string& path,
   return eufs::object_store::ScanRequestLedger(*reader, output, detail);
 }
 
+void TestCommittedAppendContracts() {
+  auto fixture = CreateImage(true);
+  eufs::object_store::RequestLedgerIndex index;
+  std::string detail;
+  Require(Scan(fixture.path, &index, &detail) == 0, detail.c_str());
+
+  auto first = Record(1, 0x71);
+  Require(index.AppendCommitted(first, &detail) == 0 && index.size() == 1 &&
+              index.next_sequence() == 2 &&
+              index.Find(first.request_id) != nullptr,
+          detail.c_str());
+
+  auto duplicate = Record(2, 0x71);
+  Require(index.AppendCommitted(duplicate, &detail) == -EEXIST &&
+              index.size() == 1 && index.next_sequence() == 2,
+          "duplicate committed request changed the in-memory index");
+  auto skipped = Record(3, 0x72);
+  Require(index.AppendCommitted(skipped, &detail) == -EUCLEAN &&
+              index.size() == 1 && index.next_sequence() == 2,
+          "out-of-order committed request changed the in-memory index");
+}
+
 int OpenBackend(const std::string& path,
                 std::unique_ptr<eufs::object_store::ObjectBackend>* output,
                 std::string* detail) {
@@ -408,6 +430,7 @@ void TestCheckerCollectsIndependentLedgerContradictions() {
 
 int main() {
   TestEmptyAndValidPrefix();
+  TestCommittedAppendContracts();
   TestHoleDuplicateAndCorruption();
   TestFeatureAndIdentityBoundaries();
   TestCheckerCollectsIndependentLedgerContradictions();

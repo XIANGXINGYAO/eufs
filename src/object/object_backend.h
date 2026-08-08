@@ -52,6 +52,24 @@ struct MutationResult {
   ObjectVersion current_version{};
 };
 
+// RPC 层在校验 payload 后构造；Backend 只使用稳定字节，不依赖 protobuf。
+struct RequestIdentity {
+  RequestId request_id{};
+  RequestFingerprint fingerprint{};
+};
+
+enum class RequestDisposition {
+  kExecuted,
+  kReplayed,
+  kRequestIdConflict,
+  kLedgerFull,
+};
+
+struct IdempotentMutationResult {
+  MutationResult mutation;
+  RequestDisposition disposition{RequestDisposition::kExecuted};
+};
+
 // 不依赖 FUSE 的进程内对象存储核心。未来 brpc handler 直接调用该类；
 // 它仍通过 session/image reader/journal 操作 eufs.img，但不经过挂载点和 FUSE 回调。
 class ObjectBackend {
@@ -81,6 +99,19 @@ class ObjectBackend {
   int ReplaceIfVersion(std::string_view name, ObjectVersion expected,
                        std::string_view data, std::uint64_t timestamp_ns,
                        MutationResult* output, std::string* detail);
+  // 带持久化 Request-ID 的远程写入口；同身份重放原结果，身份冲突绝不执行。
+  int PutIfAbsentIdempotent(std::string_view name, std::string_view data,
+                            std::uint64_t timestamp_ns,
+                            const RequestIdentity& identity,
+                            IdempotentMutationResult* output,
+                            std::string* detail);
+  int ReplaceIfVersionIdempotent(std::string_view name,
+                                 ObjectVersion expected,
+                                 std::string_view data,
+                                 std::uint64_t timestamp_ns,
+                                 const RequestIdentity& identity,
+                                 IdempotentMutationResult* output,
+                                 std::string* detail);
   // 按对象名读取完整内容；失败时调用者 output 保持原值。
   int Get(std::string_view name, std::string* output, std::string* detail);
   // 在同一个读锁快照中返回正文和元数据，保证 RPC 响应版本与 payload 一致。
@@ -105,6 +136,14 @@ class ObjectBackend {
   int ResolveRegularLocked(std::string_view name, std::uint32_t* inode_number,
                            ondisk::InodeRecord* inode,
                            std::string* detail) const;
+  int CheckRequestLocked(const RequestIdentity& identity,
+                         MutationOperation operation,
+                         IdempotentMutationResult* output, bool* handled,
+                         std::string* detail) const;
+  int CommitLedgerOnlyLocked(const RequestLedgerRecord& record,
+                             MutationOutcome* outcome, std::string* detail);
+  int PublishLedgerRecordLocked(const RequestLedgerRecord& record,
+                                std::string* detail);
   // 提交 planner 产生的三类块镜像；不确定失败会把 Backend 置为 fail-closed。
   int ApplyLocked(
       const std::map<std::uint32_t, ondisk::Block>& before_images,

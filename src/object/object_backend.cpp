@@ -3,8 +3,10 @@
 #include "journal/journal_transaction_executor.h"
 #include "metadata/new_object_plan.h"
 #include "metadata/object_replace_plan.h"
+#include "object/request_ledger_plan.h"
 
 #include <cerrno>
+#include <algorithm>
 #include <limits>
 #include <map>
 #include <sys/stat.h>
@@ -25,6 +27,40 @@ ObjectStat MakeObjectStat(std::uint32_t inode_number,
                           const ondisk::InodeRecord& inode) {
   return ObjectStat{inode_number, inode.size, inode.mtime_ns,
                     inode.generation};
+}
+
+bool HasNonzeroRequestId(const RequestId& request_id) {
+  return std::any_of(request_id.begin(), request_id.end(),
+                     [](std::uint8_t value) { return value != 0; });
+}
+
+RequestLedgerRecord MakeCommittedRecord(MutationOperation operation,
+                                        const RequestIdentity& identity,
+                                        ObjectVersion version) {
+  RequestLedgerRecord record;
+  record.operation = operation;
+  record.result_kind = LedgerResultKind::kCommitted;
+  record.request_id = identity.request_id;
+  record.fingerprint = identity.fingerprint;
+  record.result_code = LedgerResultCode::kOk;
+  record.committed_inode = version.inode_number;
+  record.committed_generation = version.generation;
+  return record;
+}
+
+RequestLedgerRecord MakeRejectedRecord(MutationOperation operation,
+                                       const RequestIdentity& identity,
+                                       LedgerResultCode code,
+                                       ObjectVersion current) {
+  RequestLedgerRecord record;
+  record.operation = operation;
+  record.result_kind = LedgerResultKind::kNotApplied;
+  record.request_id = identity.request_id;
+  record.fingerprint = identity.fingerprint;
+  record.result_code = code;
+  record.current_inode = current.inode_number;
+  record.current_generation = current.generation;
+  return record;
 }
 
 }  // 匿名命名空间：Backend 内部转换辅助函数不对外暴露。
@@ -186,6 +222,297 @@ int ObjectBackend::ResolveRegularLocked(std::string_view name,
     return -EISDIR;
   }
   return 0;
+}
+
+int ObjectBackend::CheckRequestLocked(const RequestIdentity& identity,
+                                      MutationOperation operation,
+                                      IdempotentMutationResult* output,
+                                      bool* handled,
+                                      std::string* detail) const {
+  if (output == nullptr || handled == nullptr ||
+      !HasNonzeroRequestId(identity.request_id)) {
+    SetDetail(detail, "nonzero request identity and state outputs are required");
+    return -EINVAL;
+  }
+  *handled = true;
+  if (request_ledger_ == nullptr) {
+    SetDetail(detail, "image does not provide a persistent request ledger");
+    return -EOPNOTSUPP;
+  }
+
+  const RequestLedgerRecord* existing =
+      request_ledger_->Find(identity.request_id);
+  if (existing != nullptr) {
+    if (existing->operation != operation ||
+        existing->fingerprint != identity.fingerprint) {
+      output->disposition = RequestDisposition::kRequestIdConflict;
+      SetDetail(detail, "request id was already used for different semantics");
+      return -EALREADY;
+    }
+    output->disposition = RequestDisposition::kReplayed;
+    if (existing->result_kind == LedgerResultKind::kCommitted) {
+      output->mutation.outcome = MutationOutcome::kCommitted;
+      output->mutation.committed_version =
+          ObjectVersion{existing->committed_inode,
+                        existing->committed_generation};
+      return 0;
+    }
+    output->mutation.outcome = MutationOutcome::kNotApplied;
+    output->mutation.current_version =
+        ObjectVersion{existing->current_inode, existing->current_generation};
+    if (existing->result_code == LedgerResultCode::kAlreadyExists) {
+      return -EEXIST;
+    }
+    if (existing->result_code == LedgerResultCode::kVersionMismatch) {
+      return -ESTALE;
+    }
+    if (existing->result_code == LedgerResultCode::kNotFound) {
+      return -ENOENT;
+    }
+    SetDetail(detail, "request ledger contains an unsupported replay result");
+    return -EUCLEAN;
+  }
+
+  if (request_ledger_->full()) {
+    output->disposition = RequestDisposition::kLedgerFull;
+    SetDetail(detail, "request ledger has no capacity for a new request");
+    return -ENOSPC;
+  }
+  *handled = false;
+  return 0;
+}
+
+int ObjectBackend::PublishLedgerRecordLocked(const RequestLedgerRecord& record,
+                                             std::string* detail) {
+  const int result = request_ledger_->AppendCommitted(record, detail);
+  if (result != 0) {
+    FailClosedLocked(result, detail == nullptr ? std::string_view{} : *detail);
+  }
+  return result;
+}
+
+int ObjectBackend::CommitLedgerOnlyLocked(const RequestLedgerRecord& record,
+                                          MutationOutcome* outcome,
+                                          std::string* detail) {
+  RequestLedgerAppendPlan ledger;
+  int result = PrepareRequestLedgerAppend(*reader_, *request_ledger_, record,
+                                          &ledger, detail);
+  if (result != 0) {
+    return result;
+  }
+  std::map<std::uint32_t, ondisk::Block> before_images;
+  std::map<std::uint32_t, ondisk::Block> ordered_data_after_images;
+  std::map<std::uint32_t, ondisk::Block> metadata_after_images;
+  result = MergeRequestLedgerAppend(
+      ledger, ledger.total_blocks, ledger.filesystem_uuid, &before_images,
+      &ordered_data_after_images, &metadata_after_images, detail);
+  if (result != 0) {
+    return result;
+  }
+  result = ApplyLocked(before_images, ordered_data_after_images,
+                       metadata_after_images, ledger.total_blocks,
+                       ledger.filesystem_uuid, outcome, detail);
+  if (result == 0 && *outcome == MutationOutcome::kCommitted) {
+    result = PublishLedgerRecordLocked(ledger.record, detail);
+  }
+  return result;
+}
+
+int ObjectBackend::PutIfAbsentIdempotent(
+    std::string_view name, std::string_view data, std::uint64_t timestamp_ns,
+    const RequestIdentity& identity, IdempotentMutationResult* output,
+    std::string* detail) {
+  if (detail != nullptr) {
+    detail->clear();
+  }
+  if (output == nullptr) {
+    SetDetail(detail, "idempotent creation result output is required");
+    return -EINVAL;
+  }
+  IdempotentMutationResult candidate;
+  const std::unique_lock<std::shared_mutex> lock(mutex_);
+  int result = CheckUsableLocked(detail);
+  if (result != 0) {
+    *output = candidate;
+    return result;
+  }
+  bool handled = false;
+  result = CheckRequestLocked(identity, MutationOperation::kCreateIfAbsent,
+                              &candidate, &handled, detail);
+  if (handled || result != 0) {
+    *output = candidate;
+    return result;
+  }
+
+  metadata::NewObjectPlan plan;
+  result = metadata::PrepareNewRootObject(
+      *reader_, name, data, options_.permissions, options_.uid, options_.gid,
+      timestamp_ns, &plan, detail);
+  if (result == -EEXIST) {
+    std::uint32_t inode_number = 0;
+    ondisk::InodeRecord inode;
+    result = ResolveRegularLocked(name, &inode_number, &inode, detail);
+    if (result == 0) {
+      const auto record = MakeRejectedRecord(
+          MutationOperation::kCreateIfAbsent, identity,
+          LedgerResultCode::kAlreadyExists,
+          ObjectVersion{inode_number, inode.generation});
+      MutationOutcome transaction_outcome = MutationOutcome::kNotApplied;
+      const int ledger_result =
+          CommitLedgerOnlyLocked(record, &transaction_outcome, detail);
+      if (transaction_outcome == MutationOutcome::kUnknown) {
+        candidate.mutation.outcome = MutationOutcome::kUnknown;
+        candidate.mutation.current_version = ObjectVersion{};
+        *output = candidate;
+        return ledger_result;
+      }
+      candidate.mutation.current_version =
+          ObjectVersion{inode_number, inode.generation};
+      *output = candidate;
+      return ledger_result == 0 ? -EEXIST : ledger_result;
+    }
+  }
+  if (result != 0) {
+    *output = candidate;
+    return result;
+  }
+
+  RequestLedgerAppendPlan ledger;
+  auto record = MakeCommittedRecord(
+      MutationOperation::kCreateIfAbsent, identity,
+      ObjectVersion{plan.inode_number, 1});
+  result = PrepareRequestLedgerAppend(*reader_, *request_ledger_, record,
+                                      &ledger, detail);
+  if (result == 0) {
+    result = MergeRequestLedgerAppend(
+        ledger, plan.total_blocks, plan.filesystem_uuid, &plan.before_images,
+        &plan.ordered_data_after_images, &plan.metadata_after_images, detail);
+  }
+  result = result == 0
+               ? ApplyLocked(plan.before_images, plan.ordered_data_after_images,
+                             plan.metadata_after_images, plan.total_blocks,
+                             plan.filesystem_uuid, &candidate.mutation.outcome,
+                             detail)
+               : result;
+  if (candidate.mutation.outcome == MutationOutcome::kCommitted) {
+    candidate.mutation.committed_version = {plan.inode_number, 1};
+    candidate.mutation.current_version = candidate.mutation.committed_version;
+    if (result == 0) {
+      result = PublishLedgerRecordLocked(ledger.record, detail);
+    }
+  } else if (candidate.mutation.outcome == MutationOutcome::kUnknown) {
+    candidate.mutation.current_version = ObjectVersion{};
+  }
+  *output = candidate;
+  return result;
+}
+
+int ObjectBackend::ReplaceIfVersionIdempotent(
+    std::string_view name, ObjectVersion expected, std::string_view data,
+    std::uint64_t timestamp_ns, const RequestIdentity& identity,
+    IdempotentMutationResult* output, std::string* detail) {
+  if (detail != nullptr) {
+    detail->clear();
+  }
+  if (output == nullptr) {
+    SetDetail(detail, "idempotent replacement result output is required");
+    return -EINVAL;
+  }
+  IdempotentMutationResult candidate;
+  const std::unique_lock<std::shared_mutex> lock(mutex_);
+  int result = CheckUsableLocked(detail);
+  if (result != 0) {
+    *output = candidate;
+    return result;
+  }
+  bool handled = false;
+  result = CheckRequestLocked(identity, MutationOperation::kReplaceIfVersion,
+                              &candidate, &handled, detail);
+  if (handled || result != 0) {
+    *output = candidate;
+    return result;
+  }
+
+  std::uint32_t inode_number = 0;
+  ondisk::InodeRecord inode;
+  result = ResolveRegularLocked(name, &inode_number, &inode, detail);
+  if (result == -ENOENT) {
+    const auto record = MakeRejectedRecord(
+        MutationOperation::kReplaceIfVersion, identity,
+        LedgerResultCode::kNotFound, ObjectVersion{});
+    MutationOutcome transaction_outcome = MutationOutcome::kNotApplied;
+    const int ledger_result =
+        CommitLedgerOnlyLocked(record, &transaction_outcome, detail);
+    if (transaction_outcome == MutationOutcome::kUnknown) {
+      candidate.mutation.outcome = MutationOutcome::kUnknown;
+      candidate.mutation.current_version = ObjectVersion{};
+      *output = candidate;
+      return ledger_result;
+    }
+    *output = candidate;
+    return ledger_result == 0 ? -ENOENT : ledger_result;
+  }
+  if (result != 0) {
+    *output = candidate;
+    return result;
+  }
+  candidate.mutation.current_version = {inode_number, inode.generation};
+  if (expected.inode_number != inode_number ||
+      expected.generation != inode.generation) {
+    const auto record = MakeRejectedRecord(
+        MutationOperation::kReplaceIfVersion, identity,
+        LedgerResultCode::kVersionMismatch,
+        ObjectVersion{inode_number, inode.generation});
+    MutationOutcome transaction_outcome = MutationOutcome::kNotApplied;
+    const int ledger_result =
+        CommitLedgerOnlyLocked(record, &transaction_outcome, detail);
+    if (transaction_outcome == MutationOutcome::kUnknown) {
+      candidate.mutation.outcome = MutationOutcome::kUnknown;
+      candidate.mutation.current_version = ObjectVersion{};
+      *output = candidate;
+      return ledger_result;
+    }
+    *output = candidate;
+    return ledger_result == 0 ? -ESTALE : ledger_result;
+  }
+
+  metadata::ObjectReplacePlan plan;
+  result = metadata::PrepareObjectReplace(
+      *reader_, inode_number, expected.generation, data, timestamp_ns, &plan,
+      detail);
+  if (result != 0) {
+    *output = candidate;
+    return result;
+  }
+  RequestLedgerAppendPlan ledger;
+  auto record = MakeCommittedRecord(
+      MutationOperation::kReplaceIfVersion, identity,
+      ObjectVersion{inode_number, plan.new_generation});
+  result = PrepareRequestLedgerAppend(*reader_, *request_ledger_, record,
+                                      &ledger, detail);
+  if (result == 0) {
+    result = MergeRequestLedgerAppend(
+        ledger, plan.total_blocks, plan.filesystem_uuid, &plan.before_images,
+        &plan.ordered_data_after_images, &plan.metadata_after_images, detail);
+  }
+  result = result == 0
+               ? ApplyLocked(plan.before_images, plan.ordered_data_after_images,
+                             plan.metadata_after_images, plan.total_blocks,
+                             plan.filesystem_uuid, &candidate.mutation.outcome,
+                             detail)
+               : result;
+  if (candidate.mutation.outcome == MutationOutcome::kCommitted) {
+    candidate.mutation.committed_version =
+        {inode_number, plan.new_generation};
+    candidate.mutation.current_version = candidate.mutation.committed_version;
+    if (result == 0) {
+      result = PublishLedgerRecordLocked(ledger.record, detail);
+    }
+  } else if (candidate.mutation.outcome == MutationOutcome::kUnknown) {
+    candidate.mutation.current_version = ObjectVersion{};
+  }
+  *output = candidate;
+  return result;
 }
 
 // 在已持有 Backend mutex 的前提下提交一个 planner 事务并重建 reader。

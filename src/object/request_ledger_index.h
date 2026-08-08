@@ -21,6 +21,11 @@ class RequestLedgerIndex {
   // 找不到返回 nullptr；返回指针只在当前索引不被移动/销毁期间有效。
   const RequestLedgerRecord* Find(const RequestId& request_id) const;
 
+  // 只在包含该记录的磁盘事务已经确定 COMMIT 后调用。拒绝跳号、重复 ID 和
+  // 容量越界；分配失败返回 ENOMEM，调用方必须 fail-closed 并依靠重启重扫。
+  int AppendCommitted(const RequestLedgerRecord& record,
+                      std::string* detail);
+
  private:
   friend int ScanRequestLedger(const storage::ImageReader& image,
                                RequestLedgerIndex* output,

@@ -12,13 +12,13 @@ C++17、FUSE3 和自定义磁盘格式，重点验证元数据事务、崩溃恢
 - metadata redo WAL：ordered data、descriptor/payload/COMMIT、A/B control 和 checkpoint。
 - 挂载前恢复：严格解析当前日志边界，区分未提交、已提交和结构损坏事务。
 - `eufsck`：只读扫描 inode、目录图、bitmap、块引用、link count 和不可达 inode。
-- Request Ledger 基础：固定记录格式和 CRC、mkfs 预分配、启动索引重建及
-  `eufsck` 专用损坏检查；尚未接入对象事务追加。
+- Request Ledger：固定记录格式和 CRC、mkfs 预分配、启动索引重建、对象结果与
+  ledger 单 COMMIT、Request-ID 重放/冲突/容量耗尽状态机及 `eufsck` 损坏检查。
 - FUSE 挂载路径：镜像生命周期独占锁、create、read、write 和恢复后重新加载。
 - 直接对象后端：`PutIfAbsent/Get/Stat/ReplaceIfVersion`，带版本条件的完整对象替换、
   明确变更结果和 fail-closed，不经 FUSE 数据路径。
-- 可选 brpc 服务骨架：protobuf 接口、attachment 数据路径、按并发字节和队列容量
-  背压；默认构建不要求 brpc，端到端持久化幂等尚未完成。
+- 可选 brpc 服务：protobuf Request-ID 接口、attachment 数据路径、按并发字节和
+  队列容量背压；端到端 openEuler/brpc 崩溃重试证据仍待补齐。
 
 ## 持久化顺序
 
@@ -48,7 +48,7 @@ cmake --build build -j2
 (cd build && ctest --output-on-failure)
 ```
 
-当前本地基线包含 42 个 CTest 测试。测试覆盖磁盘编解码、bitmap 分配、COW 写计划、
+当前本地基线包含 45 个 CTest 测试。测试覆盖磁盘编解码、bitmap 分配、COW 写计划、
 完整对象新建/替换、日志发布与恢复、挂载会话锁、全局一致性检查、RPC 背压以及
 Request Ledger 编解码和启动扫描。
 
@@ -87,7 +87,7 @@ Request Ledger 编解码和启动扫描。
 
 ```bash
 ./build/eufs-mkfs --image ./eufs.img --size 64M \
-  --inodes 1024 --journal-blocks 256 --force
+  --inodes 1024 --journal-blocks 256 --request-ledger-entries 1024 --force
 mkdir -p /tmp/eufs-mnt
 ./build/eufsd --image ./eufs.img -f /tmp/eufs-mnt
 ```
@@ -114,10 +114,10 @@ fusermount3 -u /tmp/eufs-mnt
 
 - 已证明的挂载写原子单位是一次实际 FUSE write callback，不是整个用户态
   `write(2)`/`pwrite(2)` 系统调用；内核可能按页边界拆分请求。
-- brpc 服务源代码和进程内背压已经建立，但尚未完成 EUFS-brpc 端到端构建证据、
-  bvar/压测，以及 Request-ID 的 RPC 接入。
-- Request Ledger 当前只能格式化、解码和重建索引；对象修改与 ledger 记录尚未进入
-  同一个 journal COMMIT，因此不能宣称持久化幂等或 exactly-once。
+- brpc 服务的 Request-ID 协议和 Backend 状态机已经接入；尚未完成 EUFS-brpc
+  端到端构建证据、bvar/压测和真实客户端超时重试故障注入。
+- 当前持久化语义只能宣称 ledger 保留期间的 at-most-once mutation effect 与确定性
+  replay，不宣称网络 exactly-once。
 - 当前尚未实现 Delete/tombstone，版本令牌不宣称覆盖 delete/recreate ABA。
 - 当前证据证明受控进程崩溃下的恢复语义，不等价于真实硬件断电认证。
 - 尚未宣称完整 POSIX 兼容、稀疏文件、double-indirect block 或在线修复。

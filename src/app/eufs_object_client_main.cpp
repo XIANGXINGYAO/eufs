@@ -6,6 +6,8 @@
 #include <gflags/gflags.h>
 
 #include <cstdint>
+#include <array>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -24,6 +26,8 @@ DEFINE_uint64(timestamp_ns, 0, "Object mtime in nanoseconds");
 DEFINE_uint32(expected_inode, 0, "Expected inode for conditional replace");
 DEFINE_uint64(expected_generation, 0,
               "Expected generation for conditional replace");
+DEFINE_string(request_id, "",
+              "16-byte Request-ID as 32 hexadecimal characters for put");
 DEFINE_int32(timeout_ms, 5000, "RPC timeout in milliseconds");
 
 namespace {
@@ -54,6 +58,27 @@ bool ComputeSha256(const std::string& payload, std::string* digest) {
   return digest_size == 32;
 }
 
+bool ParseRequestId(const std::string& text,
+                    std::array<std::uint8_t, 16>* output) {
+  if (output == nullptr || text.size() != output->size() * 2U) {
+    return false;
+  }
+  auto Nibble = [](char value) -> int {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+  };
+  for (std::size_t index = 0; index < output->size(); ++index) {
+    const int high = Nibble(text[index * 2U]);
+    const int low = Nibble(text[index * 2U + 1U]);
+    if (high < 0 || low < 0) return false;
+    (*output)[index] = static_cast<std::uint8_t>((high << 4) | low);
+  }
+  return std::any_of(output->begin(), output->end(),
+                     [](std::uint8_t value) { return value != 0; });
+}
+
 std::string Hex(const std::string& bytes) {
   std::ostringstream output;
   output << std::hex << std::setfill('0');
@@ -82,8 +107,16 @@ int main(int argc, char* argv[]) {
     return 2;
   }
   if (FLAGS_operation == "put" &&
-      (FLAGS_expected_inode == 0) != (FLAGS_expected_generation == 0)) {
-    std::cerr << "expected inode and generation must be set together\n";
+      ((FLAGS_expected_inode == 0) != (FLAGS_expected_generation == 0) ||
+       FLAGS_request_id.size() != 32)) {
+    std::cerr << "expected inode/generation must be paired and request_id must "
+                 "be a nonzero 32-hex-byte value\n";
+    return 2;
+  }
+  std::array<std::uint8_t, 16> request_id{};
+  if (FLAGS_operation == "put" &&
+      !ParseRequestId(FLAGS_request_id, &request_id)) {
+    std::cerr << "--request_id must contain 32 nonzero hexadecimal characters\n";
     return 2;
   }
 
@@ -166,6 +199,9 @@ int main(int argc, char* argv[]) {
   request.set_payload_size(payload.size());
   request.set_sha256(digest);
   request.set_timestamp_ns(FLAGS_timestamp_ns);
+  request.set_request_id(
+      std::string(reinterpret_cast<const char*>(request_id.data()),
+                  request_id.size()));
   if (FLAGS_expected_inode == 0) {
     request.mutable_create_if_absent();
   } else {

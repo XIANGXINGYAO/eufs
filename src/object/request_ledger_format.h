@@ -31,6 +31,7 @@ enum class LedgerResultCode : std::uint32_t {
   kOk = 1,
   kAlreadyExists = 2,
   kVersionMismatch = 3,
+  kNotFound = 4,
 };
 
 // 一条记录保存重放原请求结果所需的最小确定事实。

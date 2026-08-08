@@ -10,7 +10,7 @@
 namespace eufs::object_store {
 namespace {
 
-constexpr std::uint8_t kFingerprintFormatVersion = 1;
+constexpr std::uint8_t kFingerprintFormatVersion = 2;
 
 void SetDetail(std::string* detail, std::string_view message) {
   if (detail != nullptr) {
@@ -67,7 +67,7 @@ int BuildRequestFingerprint(const MutationIdentityInput& input,
   }
 
   std::vector<std::uint8_t> canonical;
-  canonical.reserve(57U + input.key.size());
+  canonical.reserve(65U + input.key.size());
   canonical.push_back(kFingerprintFormatVersion);
   canonical.push_back(static_cast<std::uint8_t>(input.operation));
   AppendLe16(static_cast<std::uint16_t>(input.key.size()), &canonical);
@@ -75,6 +75,7 @@ int BuildRequestFingerprint(const MutationIdentityInput& input,
   AppendLe64(input.payload_size, &canonical);
   canonical.insert(canonical.end(), input.payload_sha256.begin(),
                    input.payload_sha256.end());
+  AppendLe64(input.timestamp_ns, &canonical);
   canonical.push_back(create ? 1U : 2U);
   AppendLe32(input.expected_inode, &canonical);
   AppendLe64(input.expected_generation, &canonical);

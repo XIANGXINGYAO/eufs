@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <string_view>
 #include <sys/stat.h>
 #include <utility>
@@ -34,6 +35,40 @@ const RequestLedgerRecord* RequestLedgerIndex::Find(
     const RequestId& request_id) const {
   const auto found = records_.find(request_id);
   return found == records_.end() ? nullptr : &found->second;
+}
+
+int RequestLedgerIndex::AppendCommitted(const RequestLedgerRecord& record,
+                                        std::string* detail) {
+  if (detail != nullptr) {
+    detail->clear();
+  }
+  if (full()) {
+    SetDetail(detail, "request ledger index has no empty slots");
+    return -ENOSPC;
+  }
+  if (record.sequence != next_sequence_) {
+    SetDetail(detail, "committed ledger sequence does not match the index");
+    return -EUCLEAN;
+  }
+
+  // 复用磁盘编码器验证 operation/result/version 的完整组合约束。
+  RequestLedgerBytes encoded{};
+  std::string encode_detail;
+  if (!EncodeRequestLedgerRecord(record, &encoded, &encode_detail)) {
+    SetDetail(detail, encode_detail);
+    return -EUCLEAN;
+  }
+  try {
+    if (!records_.emplace(record.request_id, record).second) {
+      SetDetail(detail, "committed request id already exists in the index");
+      return -EEXIST;
+    }
+  } catch (const std::bad_alloc&) {
+    SetDetail(detail, "could not allocate the committed ledger index entry");
+    return -ENOMEM;
+  }
+  ++next_sequence_;
+  return 0;
 }
 
 int ScanRequestLedger(const storage::ImageReader& image,

@@ -13,7 +13,8 @@ namespace {
 // 输出 eufs-mkfs 支持的命令行格式；参数决定写到 stdout 还是 stderr。
 void PrintUsage(std::ostream& output) {
   output << "Usage: eufs-mkfs --image PATH --size SIZE "
-            "[--inodes N] [--journal-blocks N] [--force]\n"
+            "[--inodes N] [--journal-blocks N] "
+            "[--request-ledger-entries N] [--force]\n"
             "SIZE accepts a byte count or K/M/G suffix, for example 64M.\n";
 }
 
@@ -92,6 +93,7 @@ int main(int argc, char** argv) {
       {"size", required_argument, nullptr, 's'},
       {"inodes", required_argument, nullptr, 'n'},
       {"journal-blocks", required_argument, nullptr, 'j'},
+      {"request-ledger-entries", required_argument, nullptr, 'l'},
       {"force", no_argument, nullptr, 'f'},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
@@ -100,7 +102,7 @@ int main(int argc, char** argv) {
   // getopt_long 每次返回一个短选项字符，-1 表示参数扫描结束。
   while (true) {
     const int option_value =
-        getopt_long(argc, argv, "i:s:n:j:fh", kLongOptions, nullptr);
+        getopt_long(argc, argv, "i:s:n:j:l:fh", kLongOptions, nullptr);
     if (option_value == -1) {
       break;
     }
@@ -140,6 +142,20 @@ int main(int argc, char** argv) {
           return 2;
         }
         options.journal_blocks = static_cast<std::uint32_t>(value);
+        break;
+      }
+      case 'l': {
+        // 每个 4 KiB ledger 块容纳 32 条 128B 记录；容量必须按块预分配。
+        std::uint64_t value = 0;
+        constexpr std::uint64_t kRecordsPerBlock =
+            eufs::ondisk::kBlockSize / 128U;
+        if (!ParseUnsigned(optarg, &value) || value == 0 ||
+            value % kRecordsPerBlock != 0 ||
+            value > std::numeric_limits<std::uint32_t>::max()) {
+          std::cerr << "invalid --request-ledger-entries value\n";
+          return 2;
+        }
+        options.request_ledger_entries = static_cast<std::uint32_t>(value);
         break;
       }
       case 'f':

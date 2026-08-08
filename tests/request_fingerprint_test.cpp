@@ -20,6 +20,7 @@ eufs::object_store::MutationIdentityInput GoldenInput() {
   input.operation = eufs::object_store::MutationOperation::kCreateIfAbsent;
   input.key = "a.bin";
   input.payload_size = 3;
+  input.timestamp_ns = 7;
   for (std::size_t index = 0; index < input.payload_sha256.size(); ++index) {
     input.payload_sha256[index] = static_cast<std::uint8_t>(index);
   }
@@ -28,10 +29,10 @@ eufs::object_store::MutationIdentityInput GoldenInput() {
 
 void TestGoldenVectorAndDeterminism() {
   const eufs::object_store::RequestFingerprint expected{
-      0x38, 0x4c, 0x49, 0x53, 0x7d, 0xea, 0x4d, 0x71,
-      0x43, 0x53, 0x6c, 0xca, 0xab, 0x9c, 0x3f, 0x2c,
-      0x88, 0xf1, 0xe5, 0xd6, 0x11, 0xff, 0x0c, 0x63,
-      0x04, 0x9c, 0x44, 0x2b, 0x87, 0x50, 0x88, 0xa9,
+      0xaa, 0x6f, 0xeb, 0x93, 0xe2, 0x7f, 0x2e, 0x49,
+      0x2b, 0xc6, 0x8f, 0xe3, 0x76, 0xbd, 0x91, 0x4c,
+      0x16, 0xbd, 0xd2, 0x40, 0xdb, 0xe3, 0x5b, 0x09,
+      0x22, 0x62, 0x3d, 0xf7, 0x98, 0xf3, 0x21, 0xae,
   };
   eufs::object_store::RequestFingerprint first{};
   eufs::object_store::RequestFingerprint second{};
@@ -72,6 +73,9 @@ void TestEverySemanticFieldAffectsIdentity() {
   changed = original;
   changed.payload_sha256[0] ^= 1U;
   RequireDifferent(changed, "payload digest did not affect fingerprint");
+  changed = original;
+  ++changed.timestamp_ns;
+  RequireDifferent(changed, "timestamp did not affect fingerprint");
   changed = original;
   changed.operation =
       eufs::object_store::MutationOperation::kReplaceIfVersion;

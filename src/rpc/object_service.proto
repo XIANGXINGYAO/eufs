@@ -21,6 +21,8 @@ message PutObjectRequest {
     CreateIfAbsent create_if_absent = 5;
     ObjectVersion expected_version = 6;
   }
+  // 客户端超时重试时必须原样复用这 16 字节身份。
+  bytes request_id = 7;
 }
 
 enum PutStatus {
@@ -32,6 +34,9 @@ enum PutStatus {
   PUT_STATUS_VERSION_MISMATCH = 5;
   PUT_STATUS_STORAGE_ERROR = 6;
   PUT_STATUS_RESULT_UNKNOWN = 7;
+  PUT_STATUS_REQUEST_ID_CONFLICT = 8;
+  PUT_STATUS_LEDGER_FULL = 9;
+  PUT_STATUS_NOT_FOUND = 10;
 }
 
 message PutObjectResponse {

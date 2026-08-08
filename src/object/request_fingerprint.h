@@ -25,6 +25,8 @@ struct MutationIdentityInput {
   std::string_view key;
   std::uint64_t payload_size{0};
   PayloadDigest payload_sha256{};
+  // timestamp 会持久化为 inode mtime，因此属于请求身份，不能在重试比较中忽略。
+  std::uint64_t timestamp_ns{0};
   std::uint32_t expected_inode{0};
   std::uint64_t expected_generation{0};
 };

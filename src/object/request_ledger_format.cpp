@@ -105,10 +105,19 @@ bool ValidateRecord(const RequestLedgerRecord& value, std::string* error) {
 
   const bool expected_rejection =
       (create && value.result_code == LedgerResultCode::kAlreadyExists) ||
-      (replace && value.result_code == LedgerResultCode::kVersionMismatch);
-  if (!expected_rejection || !committed_version_empty ||
-      !has_current_version) {
+      (replace && (value.result_code == LedgerResultCode::kVersionMismatch ||
+                   value.result_code == LedgerResultCode::kNotFound));
+  if (!expected_rejection || !committed_version_empty) {
     SetError(error, "not-applied ledger result is inconsistent");
+    return false;
+  }
+  if (value.result_code == LedgerResultCode::kNotFound) {
+    if (!current_version_empty) {
+      SetError(error, "not-found ledger result must not contain a version");
+      return false;
+    }
+  } else if (!has_current_version) {
+    SetError(error, "rejected ledger result is missing the current version");
     return false;
   }
   return true;

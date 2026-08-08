@@ -1,9 +1,12 @@
 #include "rpc/object_service_impl.h"
 
+#include "object/request_fingerprint.h"
+
 #include <brpc/closure_guard.h>
 #include <brpc/controller.h>
 #include <butil/iobuf.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdint>
@@ -18,6 +21,11 @@ namespace eufs::rpc {
 namespace {
 
 constexpr std::size_t kSha256Size = 32;
+
+bool IsAllZeroRequestId(const std::string& request_id) {
+  return std::all_of(request_id.begin(), request_id.end(),
+                     [](char value) { return value == 0; });
+}
 
 // 两个 Task 回调共享此对象；原子 exchange 是 done 恰好一次的最后一道防线。
 class RpcCompletion {
@@ -123,9 +131,20 @@ bool ComputeSha256(const butil::IOBuf& payload,
 }
 
 void MapMutationResult(int result,
-                       const object_store::MutationResult& mutation,
+                       const object_store::IdempotentMutationResult& state,
                        std::string detail,
                        protocol::PutObjectResponse* response) {
+  if (state.disposition ==
+      object_store::RequestDisposition::kRequestIdConflict) {
+    SetResponse(response, protocol::PUT_STATUS_REQUEST_ID_CONFLICT,
+                std::move(detail));
+    return;
+  }
+  if (state.disposition == object_store::RequestDisposition::kLedgerFull) {
+    SetResponse(response, protocol::PUT_STATUS_LEDGER_FULL, std::move(detail));
+    return;
+  }
+  const auto& mutation = state.mutation;
   if (mutation.outcome == object_store::MutationOutcome::kUnknown) {
     SetResponse(response, protocol::PUT_STATUS_RESULT_UNKNOWN,
                 std::move(detail));
@@ -137,10 +156,20 @@ void MapMutationResult(int result,
                response->mutable_committed_version());
     return;
   }
+  if (result == -EEXIST) {
+    SetResponse(response, protocol::PUT_STATUS_ALREADY_EXISTS,
+                std::move(detail));
+    SetVersion(mutation.current_version, response->mutable_current_version());
+    return;
+  }
   if (result == -ESTALE) {
     SetResponse(response, protocol::PUT_STATUS_VERSION_MISMATCH,
                 std::move(detail));
     SetVersion(mutation.current_version, response->mutable_current_version());
+    return;
+  }
+  if (result == -ENOENT) {
+    SetResponse(response, protocol::PUT_STATUS_NOT_FOUND, std::move(detail));
     return;
   }
   SetResponse(response, protocol::PUT_STATUS_STORAGE_ERROR,
@@ -184,10 +213,13 @@ void ObjectServiceImpl::PutObject(
   const butil::IOBuf& attachment = controller->request_attachment();
   if (request->key().empty() || request->payload_size() != attachment.size() ||
       request->sha256().size() != kSha256Size ||
+      request->request_id().size() != object_store::kRequestIdSize ||
+      IsAllZeroRequestId(request->request_id()) ||
       request->precondition_case() ==
           protocol::PutObjectRequest::PRECONDITION_NOT_SET) {
     SetResponse(response, protocol::PUT_STATUS_INVALID_ARGUMENT,
-                "key, payload size, SHA-256, and precondition are required");
+                "key, payload size, SHA-256, request ID, and precondition are "
+                "required");
     return;
   }
 
@@ -227,11 +259,35 @@ void ObjectServiceImpl::PutObject(
       expected.inode_number = request->expected_version().inode_number();
       expected.generation = request->expected_version().generation();
     }
+    object_store::RequestIdentity identity;
+    std::copy(request->request_id().begin(), request->request_id().end(),
+              identity.request_id.begin());
+    object_store::MutationIdentityInput fingerprint_input;
+    fingerprint_input.operation =
+        precondition == protocol::PutObjectRequest::kCreateIfAbsent
+            ? object_store::MutationOperation::kCreateIfAbsent
+            : object_store::MutationOperation::kReplaceIfVersion;
+    fingerprint_input.key = key;
+    fingerprint_input.payload_size = request->payload_size();
+    std::copy(actual_digest.begin(), actual_digest.end(),
+              fingerprint_input.payload_sha256.begin());
+    fingerprint_input.timestamp_ns = timestamp_ns;
+    fingerprint_input.expected_inode = expected.inode_number;
+    fingerprint_input.expected_generation = expected.generation;
+    std::string fingerprint_detail;
+    if (object_store::BuildRequestFingerprint(
+            fingerprint_input, &identity.fingerprint, &fingerprint_detail) !=
+        0) {
+      SetResponse(context->response, protocol::PUT_STATUS_INVALID_ARGUMENT,
+                  std::move(fingerprint_detail));
+      context->completion->Run();
+      return;
+    }
 
     QueuedTask task(
         std::move(*lease),
         [this, context, payload = std::move(payload), key, timestamp_ns,
-         precondition, expected]() mutable {
+         precondition, expected, identity]() mutable {
           try {
             std::string contiguous_payload;
             if (payload.copy_to(&contiguous_payload) != payload.size()) {
@@ -245,24 +301,17 @@ void ObjectServiceImpl::PutObject(
             std::string detail;
             if (precondition ==
                 protocol::PutObjectRequest::kCreateIfAbsent) {
-              object_store::MutationResult mutation;
-              const int result = backend_->PutIfAbsent(
-                  key, contiguous_payload, timestamp_ns, &mutation, &detail);
-              if (result == -EEXIST) {
-                SetResponse(context->response,
-                            protocol::PUT_STATUS_ALREADY_EXISTS,
-                            std::move(detail));
-                SetVersion(mutation.current_version,
-                           context->response->mutable_current_version());
-              } else {
-                MapMutationResult(result, mutation, std::move(detail),
-                                  context->response);
-              }
-            } else {
-              object_store::MutationResult mutation;
-              const int result = backend_->ReplaceIfVersion(
-                  key, expected, contiguous_payload, timestamp_ns, &mutation,
+              object_store::IdempotentMutationResult mutation;
+              const int result = backend_->PutIfAbsentIdempotent(
+                  key, contiguous_payload, timestamp_ns, identity, &mutation,
                   &detail);
+              MapMutationResult(result, mutation, std::move(detail),
+                                context->response);
+            } else {
+              object_store::IdempotentMutationResult mutation;
+              const int result = backend_->ReplaceIfVersionIdempotent(
+                  key, expected, contiguous_payload, timestamp_ns, identity,
+                  &mutation, &detail);
               MapMutationResult(result, mutation, std::move(detail),
                                 context->response);
             }
