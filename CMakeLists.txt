@@ -294,6 +294,25 @@ if(EUFS_BUILD_BRPC_SERVICE)
     PkgConfig::BRPC_PROTOBUF OpenSSL::SSL OpenSSL::Crypto
     ${CMAKE_DL_LIBS} rt Threads::Threads
   )
+
+  add_executable(eufs_object_load_client
+    src/app/eufs_object_load_client_main.cpp
+  )
+  target_include_directories(eufs_object_load_client SYSTEM PRIVATE
+    ${BRPC_INCLUDE_DIR}
+  )
+  target_compile_definitions(eufs_object_load_client PRIVATE
+    __const__=__unused__
+  )
+  target_compile_options(eufs_object_load_client PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  target_link_libraries(eufs_object_load_client PRIVATE
+    eufs_rpc_protocol ${BRPC_LIBRARY}
+    PkgConfig::BRPC_GFLAGS PkgConfig::BRPC_LEVELDB
+    PkgConfig::BRPC_PROTOBUF OpenSSL::SSL OpenSSL::Crypto
+    ${CMAKE_DL_LIBS} rt Threads::Threads
+  )
 endif()
 
 target_link_libraries(eufs_mkfs_core PUBLIC eufs_journal_format)

@@ -1,5 +1,6 @@
 #include "rpc/object_service_impl.h"
 
+#include "metadata/ondisk_format.h"
 #include "object/request_fingerprint.h"
 
 #include <brpc/closure_guard.h>
@@ -261,6 +262,21 @@ void ObjectServiceImpl::PutObject(
                 "required");
     return;
   }
+  if (request->key().size() > ondisk::kMaxNameLength ||
+      attachment.size() > ondisk::kMaxFileSize) {
+    SetResponse(response, protocol::PUT_STATUS_INVALID_ARGUMENT,
+                "key or payload exceeds the EUFS v1 format limit");
+    return;
+  }
+
+  // 先取得资源预算，再执行线性复杂度的摘要计算；超载请求不消耗哈希 CPU。
+  auto lease = byte_limiter_.TryAcquire(attachment.size());
+  if (!lease.has_value()) {
+    SetResponse(response, protocol::PUT_STATUS_OVERLOADED,
+                "inflight payload byte limit exceeded");
+    metrics_.RecordInflightByteRejection();
+    return;
+  }
 
   std::array<unsigned char, kSha256Size> actual_digest{};
   if (!ComputeSha256(attachment, &actual_digest)) {
@@ -273,14 +289,6 @@ void ObjectServiceImpl::PutObject(
                     actual_digest.size()) != 0) {
     SetResponse(response, protocol::PUT_STATUS_INVALID_ARGUMENT,
                 "request SHA-256 does not match attachment");
-    return;
-  }
-
-  auto lease = byte_limiter_.TryAcquire(attachment.size());
-  if (!lease.has_value()) {
-    SetResponse(response, protocol::PUT_STATUS_OVERLOADED,
-                "inflight payload byte limit exceeded");
-    metrics_.RecordInflightByteRejection();
     return;
   }
 

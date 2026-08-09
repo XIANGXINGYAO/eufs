@@ -1,0 +1,11 @@
+eufsck 镜像: /root/eufs-overload-matrix-20260809-v9/byte-overload/eufs.img
+结论: 当前检查规则内健康
+扫描状态: 完整
+证据门禁:
+  bitmap 几何: 完整
+  根 inode 解码: 完整
+  根目录可达性: 完整
+  块引用扫描: 完整
+  inode 引用计数扫描: 完整
+  Request Ledger 扫描: 完整（已启用）
+统计: 物理扫描 inode=4, 根可达 inode=4, 块引用=1965, ledger 槽位=256/256, ledger 记录=2, 问题=0

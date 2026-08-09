@@ -78,6 +78,9 @@ int main(int argc, char* argv[]) {
   }
 
   brpc::ServerOptions server_options;
+  // bthread 是进程级线程池；交给 --bthread_concurrency 统一配置。小型 VM 上
+  // ServerOptions 的 ncore+1 默认值可能低于已初始化线程数，brpc 不支持缩容。
+  server_options.num_threads = 0;
   if (server.Start(endpoint, &server_options) != 0) {
     LOG(ERROR) << "could not start EUFS object server";
     return 6;
