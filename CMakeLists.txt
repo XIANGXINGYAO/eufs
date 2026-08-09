@@ -237,6 +237,7 @@ if(EUFS_BUILD_BRPC_SERVICE)
   target_link_libraries(eufs_rpc_protocol PUBLIC PkgConfig::BRPC_PROTOBUF)
 
   add_library(eufs_object_service
+    src/rpc/object_service_metrics.cpp
     src/rpc/object_service_impl.cpp
   )
   target_include_directories(eufs_object_service PUBLIC
@@ -719,6 +720,21 @@ if(BUILD_TESTING)
     -Wall -Wextra -Wpedantic
   )
   add_test(NAME rpc_admission_queue_test COMMAND rpc_admission_queue_test)
+
+  if(EUFS_BUILD_BRPC_SERVICE)
+    add_executable(object_service_metrics_test
+      tests/object_service_metrics_test.cpp
+    )
+    target_link_libraries(object_service_metrics_test PRIVATE
+      eufs_object_service
+    )
+    target_compile_options(object_service_metrics_test PRIVATE
+      -Wall -Wextra -Wpedantic
+    )
+    add_test(NAME object_service_metrics_test
+      COMMAND object_service_metrics_test
+    )
+  endif()
 
   add_executable(request_fingerprint_test
     tests/request_fingerprint_test.cpp

@@ -5,6 +5,7 @@
 #include <brpc/closure_guard.h>
 #include <brpc/controller.h>
 #include <butil/iobuf.h>
+#include <butil/time.h>
 
 #include <algorithm>
 #include <array>
@@ -50,6 +51,7 @@ struct PutContext {
   protocol::PutStatus cancel_status{
       protocol::PUT_STATUS_SERVER_STOPPING};
   const char* cancel_detail{"server is stopping"};
+  butil::Timer queue_wait_timer;
 };
 
 template <typename Response>
@@ -60,6 +62,7 @@ struct ReadContext {
   protocol::ReadStatus cancel_status{
       protocol::READ_STATUS_SERVER_STOPPING};
   const char* cancel_detail{"server is stopping"};
+  butil::Timer queue_wait_timer;
 };
 
 void SetResponse(protocol::PutObjectResponse* response,
@@ -176,6 +179,41 @@ void MapMutationResult(int result,
               std::move(detail));
 }
 
+void RecordMutationDisposition(
+    const object_store::IdempotentMutationResult& state,
+    ObjectServiceMetrics* metrics) {
+  if (state.disposition == object_store::RequestDisposition::kReplayed) {
+    metrics->RecordRequestReplay();
+  }
+}
+
+void RecordPutStatus(protocol::PutStatus status,
+                     ObjectServiceMetrics* metrics) {
+  switch (status) {
+    case protocol::PUT_STATUS_REQUEST_ID_CONFLICT:
+      metrics->RecordRequestIdConflict();
+      break;
+    case protocol::PUT_STATUS_LEDGER_FULL:
+      metrics->RecordLedgerFull();
+      break;
+    case protocol::PUT_STATUS_RESULT_UNKNOWN:
+      metrics->RecordResultUnknown();
+      break;
+    case protocol::PUT_STATUS_STORAGE_ERROR:
+      metrics->RecordStorageError();
+      break;
+    default:
+      break;
+  }
+}
+
+template <typename Response>
+void RecordReadStatus(const Response& response, ObjectServiceMetrics* metrics) {
+  if (response.status() == protocol::READ_STATUS_STORAGE_ERROR) {
+    metrics->RecordStorageError();
+  }
+}
+
 }  // namespace
 
 ObjectServiceImpl::ObjectServiceImpl(object_store::ObjectBackend* backend,
@@ -184,6 +222,7 @@ ObjectServiceImpl::ObjectServiceImpl(object_store::ObjectBackend* backend,
       byte_limiter_(options.max_inflight_bytes),
       write_queue_(options.max_queued_write_tasks),
       read_queue_(options.max_queued_read_tasks),
+      metrics_(&byte_limiter_, &write_queue_, &read_queue_),
       write_worker_(&ObjectServiceImpl::WriteWorkerMain, this) {
   read_workers_.reserve(options.read_worker_count);
   for (std::size_t index = 0; index < options.read_worker_count; ++index) {
@@ -227,6 +266,7 @@ void ObjectServiceImpl::PutObject(
   if (!ComputeSha256(attachment, &actual_digest)) {
     SetResponse(response, protocol::PUT_STATUS_STORAGE_ERROR,
                 "could not compute request SHA-256");
+    metrics_.RecordStorageError();
     return;
   }
   if (CRYPTO_memcmp(actual_digest.data(), request->sha256().data(),
@@ -240,6 +280,7 @@ void ObjectServiceImpl::PutObject(
   if (!lease.has_value()) {
     SetResponse(response, protocol::PUT_STATUS_OVERLOADED,
                 "inflight payload byte limit exceeded");
+    metrics_.RecordInflightByteRejection();
     return;
   }
 
@@ -284,36 +325,42 @@ void ObjectServiceImpl::PutObject(
       return;
     }
 
+    // 只把成功入队后等待 worker 的时间归入 queue wait；此前摘要和指纹计算属于准入。
+    context->queue_wait_timer.start();
     QueuedTask task(
         std::move(*lease),
         [this, context, payload = std::move(payload), key, timestamp_ns,
          precondition, expected, identity]() mutable {
+          context->queue_wait_timer.stop();
+          metrics_.RecordWriteQueueWait(
+              context->queue_wait_timer.u_elapsed());
+          butil::Timer execution_timer(butil::Timer::STARTED);
           try {
             std::string contiguous_payload;
             if (payload.copy_to(&contiguous_payload) != payload.size()) {
               SetResponse(context->response,
                           protocol::PUT_STATUS_STORAGE_ERROR,
                           "could not flatten request attachment");
-              context->completion->Run();
-              return;
-            }
-
-            std::string detail;
-            if (precondition ==
-                protocol::PutObjectRequest::kCreateIfAbsent) {
-              object_store::IdempotentMutationResult mutation;
-              const int result = backend_->PutIfAbsentIdempotent(
-                  key, contiguous_payload, timestamp_ns, identity, &mutation,
-                  &detail);
-              MapMutationResult(result, mutation, std::move(detail),
-                                context->response);
             } else {
-              object_store::IdempotentMutationResult mutation;
-              const int result = backend_->ReplaceIfVersionIdempotent(
-                  key, expected, contiguous_payload, timestamp_ns, identity,
-                  &mutation, &detail);
-              MapMutationResult(result, mutation, std::move(detail),
-                                context->response);
+              std::string detail;
+              if (precondition ==
+                  protocol::PutObjectRequest::kCreateIfAbsent) {
+                object_store::IdempotentMutationResult mutation;
+                const int result = backend_->PutIfAbsentIdempotent(
+                    key, contiguous_payload, timestamp_ns, identity, &mutation,
+                    &detail);
+                RecordMutationDisposition(mutation, &metrics_);
+                MapMutationResult(result, mutation, std::move(detail),
+                                  context->response);
+              } else {
+                object_store::IdempotentMutationResult mutation;
+                const int result = backend_->ReplaceIfVersionIdempotent(
+                    key, expected, contiguous_payload, timestamp_ns, identity,
+                    &mutation, &detail);
+                RecordMutationDisposition(mutation, &metrics_);
+                MapMutationResult(result, mutation, std::move(detail),
+                                  context->response);
+              }
             }
           } catch (const std::exception& error) {
             SetResponse(context->response, protocol::PUT_STATUS_STORAGE_ERROR,
@@ -322,6 +369,9 @@ void ObjectServiceImpl::PutObject(
             SetResponse(context->response, protocol::PUT_STATUS_STORAGE_ERROR,
                         "unknown PutObject worker failure");
           }
+          RecordPutStatus(context->response->status(), &metrics_);
+          execution_timer.stop();
+          metrics_.RecordPutExecution(execution_timer.u_elapsed());
           context->completion->Run();
         },
         [context] {
@@ -339,22 +389,27 @@ void ObjectServiceImpl::PutObject(
     if (enqueue_result == EnqueueResult::kFull) {
       context->cancel_status = protocol::PUT_STATUS_OVERLOADED;
       context->cancel_detail = "bounded task queue is full";
+      metrics_.RecordWriteQueueRejection();
     } else if (enqueue_result == EnqueueResult::kResourceExhausted) {
       context->cancel_status = protocol::PUT_STATUS_OVERLOADED;
       context->cancel_detail = "task queue allocation failed";
+      metrics_.RecordQueueAllocationFailure();
     } else if (enqueue_result == EnqueueResult::kStopped) {
       context->cancel_status = protocol::PUT_STATUS_SERVER_STOPPING;
       context->cancel_detail = "server is stopping";
     } else {
       context->cancel_status = protocol::PUT_STATUS_STORAGE_ERROR;
       context->cancel_detail = "invalid queued PutObject task";
+      metrics_.RecordStorageError();
     }
     task.Cancel();
   } catch (const std::exception& error) {
     SetResponse(response, protocol::PUT_STATUS_STORAGE_ERROR, error.what());
+    metrics_.RecordStorageError();
   } catch (...) {
     SetResponse(response, protocol::PUT_STATUS_STORAGE_ERROR,
                 "unknown PutObject admission failure");
+    metrics_.RecordStorageError();
   }
 }
 
@@ -388,8 +443,13 @@ void ObjectServiceImpl::GetObject(
     context->completion = std::make_shared<RpcCompletion>();
     const std::string key = request->key();
 
+    context->queue_wait_timer.start();
     QueuedTask task(
         [this, context, key] {
+          context->queue_wait_timer.stop();
+          metrics_.RecordReadQueueWait(
+              context->queue_wait_timer.u_elapsed());
+          butil::Timer execution_timer(butil::Timer::STARTED);
           try {
             std::string payload;
             object_store::ObjectStat stat;
@@ -407,6 +467,9 @@ void ObjectServiceImpl::GetObject(
                             protocol::READ_STATUS_STORAGE_ERROR,
                             "unknown GetObject worker failure");
           }
+          RecordReadStatus(*context->response, &metrics_);
+          execution_timer.stop();
+          metrics_.RecordGetExecution(execution_timer.u_elapsed());
           context->completion->Run();
         },
         [context] {
@@ -426,20 +489,28 @@ void ObjectServiceImpl::GetObject(
       context->cancel_detail = enqueue_result == EnqueueResult::kFull
                                    ? "bounded read queue is full"
                                    : "read queue allocation failed";
+      if (enqueue_result == EnqueueResult::kFull) {
+        metrics_.RecordReadQueueRejection();
+      } else {
+        metrics_.RecordQueueAllocationFailure();
+      }
     } else if (enqueue_result == EnqueueResult::kStopped) {
       context->cancel_status = protocol::READ_STATUS_SERVER_STOPPING;
       context->cancel_detail = "server is stopping";
     } else {
       context->cancel_status = protocol::READ_STATUS_STORAGE_ERROR;
       context->cancel_detail = "invalid queued GetObject task";
+      metrics_.RecordStorageError();
     }
     task.Cancel();
   } catch (const std::exception& error) {
     SetReadResponse(response, protocol::READ_STATUS_STORAGE_ERROR,
                     error.what());
+    metrics_.RecordStorageError();
   } catch (...) {
     SetReadResponse(response, protocol::READ_STATUS_STORAGE_ERROR,
                     "unknown GetObject admission failure");
+    metrics_.RecordStorageError();
   }
 }
 
@@ -473,8 +544,13 @@ void ObjectServiceImpl::StatObject(
     context->completion = std::make_shared<RpcCompletion>();
     const std::string key = request->key();
 
+    context->queue_wait_timer.start();
     QueuedTask task(
         [this, context, key] {
+          context->queue_wait_timer.stop();
+          metrics_.RecordReadQueueWait(
+              context->queue_wait_timer.u_elapsed());
+          butil::Timer execution_timer(butil::Timer::STARTED);
           try {
             object_store::ObjectStat stat;
             std::string detail;
@@ -488,6 +564,9 @@ void ObjectServiceImpl::StatObject(
                             protocol::READ_STATUS_STORAGE_ERROR,
                             "unknown StatObject worker failure");
           }
+          RecordReadStatus(*context->response, &metrics_);
+          execution_timer.stop();
+          metrics_.RecordStatExecution(execution_timer.u_elapsed());
           context->completion->Run();
         },
         [context] {
@@ -507,20 +586,28 @@ void ObjectServiceImpl::StatObject(
       context->cancel_detail = enqueue_result == EnqueueResult::kFull
                                    ? "bounded read queue is full"
                                    : "read queue allocation failed";
+      if (enqueue_result == EnqueueResult::kFull) {
+        metrics_.RecordReadQueueRejection();
+      } else {
+        metrics_.RecordQueueAllocationFailure();
+      }
     } else if (enqueue_result == EnqueueResult::kStopped) {
       context->cancel_status = protocol::READ_STATUS_SERVER_STOPPING;
       context->cancel_detail = "server is stopping";
     } else {
       context->cancel_status = protocol::READ_STATUS_STORAGE_ERROR;
       context->cancel_detail = "invalid queued StatObject task";
+      metrics_.RecordStorageError();
     }
     task.Cancel();
   } catch (const std::exception& error) {
     SetReadResponse(response, protocol::READ_STATUS_STORAGE_ERROR,
                     error.what());
+    metrics_.RecordStorageError();
   } catch (...) {
     SetReadResponse(response, protocol::READ_STATUS_STORAGE_ERROR,
                     "unknown StatObject admission failure");
+    metrics_.RecordStorageError();
   }
 }
 

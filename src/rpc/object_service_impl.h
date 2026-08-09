@@ -4,6 +4,7 @@
 #include "object_service.pb.h"
 #include "rpc/bounded_task_queue.h"
 #include "rpc/inflight_byte_limiter.h"
+#include "rpc/object_service_metrics.h"
 
 #include <atomic>
 #include <cstddef>
@@ -57,6 +58,8 @@ class ObjectServiceImpl final : public protocol::ObjectService {
   InflightByteLimiter byte_limiter_;
   BoundedTaskQueue write_queue_;
   BoundedTaskQueue read_queue_;
+  // 必须声明在 limiter/queue 之后，保证三个 PassiveStatus 的数据源先构造、后析构。
+  ObjectServiceMetrics metrics_;
   std::atomic<bool> stopping_{false};
   std::thread write_worker_;
   std::vector<std::thread> read_workers_;
