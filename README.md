@@ -186,6 +186,7 @@ fusermount3 -u /tmp/eufs-mnt
 
 - [磁盘格式](docs/eufs_v1_on_disk_format.md)
 - [日志事务格式](docs/eufs_v1_journal_transaction_format.md)
+- [项目答辩与简历事实表](docs/项目答辩与简历事实表_20260809.md)
 - [日志发布顺序审计](evidence/research/stage-d-journal-publication-order-audit-20260722.md)
 - [openEuler 集成审计](evidence/research/openeuler-integration-audit-20260710.md)
 - [openEuler brpc Request-ID 六阶段崩溃矩阵](evidence/brpc/request_id_crash_matrix_20260808/summary.log)
